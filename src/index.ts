@@ -3,13 +3,17 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
+  type CallToolResult,
   ErrorCode,
+  type ListToolsResult,
   ListToolsRequestSchema,
-  McpError
+  McpError,
+  type Tool,
+  type ToolAnnotations
 } from '@modelcontextprotocol/sdk/types.js';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { z } from 'zod';
 
 import {
@@ -17,13 +21,15 @@ import {
   compareImagesSchema,
   describeImageSchema,
   ocrImageSchema,
-  toolInputSchemas
+  toolInputSchemas,
+  visionResultOutputSchema
 } from './schemas.js';
 import {
   answerAboutImage,
   compareImages,
   describeImage,
-  ocrImage
+  ocrImage,
+  type VisionResult
 } from './vision.js';
 
 const moduleRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -31,74 +37,101 @@ const runtimeRoot = ['dist', 'src'].includes(path.basename(moduleRoot)) ? path.d
 const packageVersion = readPackageVersion();
 
 // Caller model whitelist: only allow GLM / DeepSeek series by default
-const defaultAllowedCallerPrefixes = ['glm', 'deepseek'];
+export const defaultAllowedCallerPrefixes = ['glm', 'deepseek'];
 
-function assertCallerAllowed(callerModel?: string): void {
+const visionToolAnnotations: ToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true
+};
+
+export function assertCallerAllowed(callerModel: unknown): void {
   const rawAllowed = process.env.VISIONTOOL_ALLOWED_CALLER_PREFIXES?.trim();
   const prefixes = rawAllowed
     ? rawAllowed.split(',').map((p) => p.trim().toLowerCase()).filter(Boolean)
     : defaultAllowedCallerPrefixes;
-  // '*' means allow all callers
+  const caller = typeof callerModel === 'string' ? callerModel.trim() : '';
+  if (!caller) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      '_caller_model is required. The caller must identify its model before using VisionToolMCP.'
+    );
+  }
+  // '*' means allow any non-empty caller.
   if (prefixes.includes('*')) {
     return;
   }
-  // If no caller model provided, just return (make it optional)
-  if (!callerModel) {
-    return;
-  }
-  const callerLower = callerModel.toLowerCase();
+  const callerLower = caller.toLowerCase();
   const allowed = prefixes.some((prefix) => callerLower.startsWith(prefix));
   if (!allowed) {
     throw new McpError(
       ErrorCode.InvalidParams,
-      `Caller model "${callerModel}" is not allowed. VISIONTOOL_ALLOWED_CALLER_PREFIXES only permits models starting with ${prefixes.map((p) => `"${p}"`).join(', ')}.`
+      `Caller model "${caller}" is not allowed. VISIONTOOL_ALLOWED_CALLER_PREFIXES only permits models starting with ${prefixes.map((p) => `"${p}"`).join(', ')}.`
     );
   }
 }
 
-const server = new Server(
-  {
-    name: 'visiontool-mcp',
-    version: packageVersion
-  },
-  {
-    capabilities: {
-      tools: {}
+export function createVisionToolServer(): Server {
+  const server = new Server(
+    {
+      name: 'visiontool-mcp',
+      version: packageVersion
+    },
+    {
+      capabilities: {
+        tools: {}
+      }
     }
-  }
-);
+  );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: 'describe_image',
-      description: '【仅限 GLM/DeepSeek 系列模型调用】Describe an image for a text-only agent. Accepts a local path, base64 image data, or URL.',
-      inputSchema: toolInputSchemas.describe_image
-    },
-    {
-      name: 'ocr_image',
-      description: '【仅限 GLM/DeepSeek 系列模型调用】Extract visible text from an image with optional language and layout hints.',
-      inputSchema: toolInputSchemas.ocr_image
-    },
-    {
-      name: 'answer_about_image',
-      description: '【仅限 GLM/DeepSeek 系列模型调用】Answer a specific question using visual evidence from one image.',
-      inputSchema: toolInputSchemas.answer_about_image
-    },
-    {
-      name: 'compare_images',
-      description: '【仅限 GLM/DeepSeek 系列模型调用】Compare two images and summarize relevant differences for a text-only agent.',
-      inputSchema: toolInputSchemas.compare_images
-    }
-  ]
-}));
+  server.setRequestHandler(ListToolsRequestSchema, async (): Promise<ListToolsResult> => ({
+    tools: [
+      {
+        name: 'describe_image',
+        description: '【默认仅限 GLM/DeepSeek 系列模型调用】Describe an image for a text-only agent. Accepts a local path, base64 image data, or URL.',
+        inputSchema: asInputSchema(toolInputSchemas.describe_image),
+        outputSchema: asOutputSchema(visionResultOutputSchema),
+        annotations: { ...visionToolAnnotations, title: 'Describe Image' }
+      },
+      {
+        name: 'ocr_image',
+        description: '【默认仅限 GLM/DeepSeek 系列模型调用】Extract visible text from an image with optional language and layout hints.',
+        inputSchema: asInputSchema(toolInputSchemas.ocr_image),
+        outputSchema: asOutputSchema(visionResultOutputSchema),
+        annotations: { ...visionToolAnnotations, title: 'OCR Image' }
+      },
+      {
+        name: 'answer_about_image',
+        description: '【默认仅限 GLM/DeepSeek 系列模型调用】Answer a specific question using visual evidence from one image.',
+        inputSchema: asInputSchema(toolInputSchemas.answer_about_image),
+        outputSchema: asOutputSchema(visionResultOutputSchema),
+        annotations: { ...visionToolAnnotations, title: 'Answer About Image' }
+      },
+      {
+        name: 'compare_images',
+        description: '【默认仅限 GLM/DeepSeek 系列模型调用】Compare two images and summarize relevant differences for a text-only agent.',
+        inputSchema: asInputSchema(toolInputSchemas.compare_images),
+        outputSchema: asOutputSchema(visionResultOutputSchema),
+        annotations: { ...visionToolAnnotations, title: 'Compare Images' }
+      }
+    ]
+  }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-  const callerModel = (args as Record<string, unknown>)?._caller_model as string | undefined;
+  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => handleToolCall(request.params.name, request.params.arguments));
+  return server;
+}
+
+export async function startVisionToolServer(): Promise<void> {
+  const server = createVisionToolServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+async function handleToolCall(name: string, args: unknown): Promise<CallToolResult> {
+  const callerModel = (args as Record<string, unknown>)?._caller_model;
 
   try {
-    // Validate caller model whitelist BEFORE processing
     assertCallerAllowed(callerModel);
 
     switch (name) {
@@ -128,7 +161,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ]
     };
   }
-});
+}
 
 function parseArgs<T extends z.ZodTypeAny>(schema: T, args: unknown): z.infer<T> {
   const parsed = schema.safeParse(args ?? {});
@@ -138,8 +171,17 @@ function parseArgs<T extends z.ZodTypeAny>(schema: T, args: unknown): z.infer<T>
   return parsed.data;
 }
 
-function jsonResult(value: unknown) {
+function asInputSchema(schema: unknown): Tool['inputSchema'] {
+  return structuredClone(schema) as Tool['inputSchema'];
+}
+
+function asOutputSchema(schema: unknown): NonNullable<Tool['outputSchema']> {
+  return structuredClone(schema) as NonNullable<Tool['outputSchema']>;
+}
+
+function jsonResult(value: VisionResult): CallToolResult {
   return {
+    structuredContent: value as unknown as Record<string, unknown>,
     content: [
       {
         type: 'text',
@@ -167,5 +209,10 @@ function readPackageVersion(): string {
   }
 }
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+function isDirectRun(): boolean {
+  return process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+}
+
+if (isDirectRun()) {
+  await startVisionToolServer();
+}

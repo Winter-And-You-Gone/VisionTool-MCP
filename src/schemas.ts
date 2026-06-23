@@ -24,7 +24,7 @@ const commonVisionOptionsSchema = z.object({
   detail: z.enum(detailLevels).optional().default('medium'),
   maxTokens: z.number().int().min(128).max(4096).optional().default(1024),
   model: z.string().min(1).optional(),
-  _caller_model: z.string().min(1).optional()
+  _caller_model: z.string().min(1)
 }).strict();
 
 export const describeImageSchema = z.object({
@@ -91,8 +91,36 @@ const imageInputSchema = {
 const commonProperties = {
   detail: { type: 'string', enum: detailLevels, default: 'medium', description: 'How much visual detail to request from the vision model.' },
   maxTokens: { type: 'integer', minimum: 128, maximum: 4096, default: 1024 },
-  model: { type: 'string', description: 'Optional Claude model override. Defaults to VISIONTOOL_MODEL or claude-opus-4-8.' },
-  _caller_model: { type: 'string', description: '【限制项】调用方模型名。仅限 GLM / DeepSeek 系列模型调用此工具，其他模型将被拒绝。' }
+  model: { type: 'string', description: 'Optional provider model override. Defaults to VISIONTOOL_MODEL or the selected provider default.' },
+  _caller_model: { type: 'string', description: '【限制项】调用方模型名。默认仅允许 GLM / DeepSeek 系列；可用 VISIONTOOL_ALLOWED_CALLER_PREFIXES 覆盖，* 表示允许任意非空调用者。' }
+} as const;
+
+export const visionResultOutputSchema = {
+  type: 'object',
+  properties: {
+    tool: { type: 'string', description: 'Tool that produced this result.' },
+    model: { type: 'string', description: 'Vision model used for the upstream request.' },
+    apiFormat: { type: 'string', enum: ['anthropic', 'openai', 'gemini'], description: 'Provider API format used for the upstream request.' },
+    text: { type: 'string', description: 'Text answer returned by the vision model.' },
+    images: {
+      type: 'array',
+      description: 'Normalized metadata for images submitted to the upstream model.',
+      items: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', enum: ['path', 'base64', 'url'] },
+          mediaType: { type: 'string' },
+          path: { type: 'string' },
+          url: { type: 'string' },
+          bytes: { type: 'integer', minimum: 0 }
+        },
+        required: ['source'],
+        additionalProperties: false
+      }
+    }
+  },
+  required: ['tool', 'model', 'apiFormat', 'text', 'images'],
+  additionalProperties: false
 } as const;
 
 export const toolInputSchemas = {
@@ -104,7 +132,7 @@ export const toolInputSchemas = {
       focus: { type: 'string', description: 'Optional visual area or topic to focus on.' },
       ...commonProperties
     },
-    required: ['image'],
+    required: ['image', '_caller_model'],
     additionalProperties: false
   },
   ocr_image: {
@@ -116,7 +144,7 @@ export const toolInputSchemas = {
       ...commonProperties,
       maxTokens: { type: 'integer', minimum: 128, maximum: 4096, default: 2048 }
     },
-    required: ['image'],
+    required: ['image', '_caller_model'],
     additionalProperties: false
   },
   answer_about_image: {
@@ -126,7 +154,7 @@ export const toolInputSchemas = {
       question: { type: 'string', description: 'Question to answer using visual evidence from the image.' },
       ...commonProperties
     },
-    required: ['image', 'question'],
+    required: ['image', 'question', '_caller_model'],
     additionalProperties: false
   },
   compare_images: {
@@ -138,7 +166,7 @@ export const toolInputSchemas = {
       ...commonProperties,
       maxTokens: { type: 'integer', minimum: 128, maximum: 4096, default: 1536 }
     },
-    required: ['firstImage', 'secondImage'],
+    required: ['firstImage', 'secondImage', '_caller_model'],
     additionalProperties: false
   }
 } as const;

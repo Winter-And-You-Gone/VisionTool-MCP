@@ -1,6 +1,6 @@
 # VisionToolMCP
 
-VisionToolMCP 是一个 MCP 服务器，为纯文本 Agent 提供视觉能力桥梁。它接受图像文件、base64 图像数据或图像 URL，将它们发送到多模态模型，并通过 MCP 返回结构化文本结果。
+VisionToolMCP 是一个 MCP 服务器，为纯文本 Agent 提供视觉能力桥梁。它接受图像文件、base64 图像数据或图像 URL，将它们发送到多模态模型，并通过 MCP 返回文本内容和 `structuredContent` 结构化结果。
 
 ## 功能特性
 
@@ -40,7 +40,7 @@ VISIONTOOL_API_FORMAT=gemini VISIONTOOL_API_KEY=你的密钥 npm run dev
       "env": {
         "VISIONTOOL_API_KEY": "你的Gemini密钥",
         "VISIONTOOL_API_FORMAT": "gemini",
-        "VISIONTOOL_MODEL": "gemini-3.5-flash",
+        "VISIONTOOL_MODEL": "gemini-2.5-flash",
         "VISIONTOOL_BASE_URL": "https://generativelanguage.googleapis.com"
       }
     }
@@ -56,12 +56,18 @@ VISIONTOOL_API_FORMAT=gemini VISIONTOOL_API_KEY=你的密钥 npm run dev
 |---------|------|--------|
 | `VISIONTOOL_API_FORMAT` | API 格式：`anthropic`、`openai` 或 `gemini` | `anthropic` |
 | `VISIONTOOL_API_KEY` | 统一 API 密钥，也可使用提供商特定的密钥（如 `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`GEMINI_API_KEY`） | - |
-| `VISIONTOOL_MODEL` | 使用的模型 | `claude-opus-4-8` (Anthropic) / `gpt-4o-mini` (OpenAI) / `gemini-3.5-flash` (Gemini) |
+| `VISIONTOOL_MODEL` | 使用的模型 | `claude-opus-4-8` (Anthropic) / `gpt-4o-mini` (OpenAI) / `gemini-2.5-flash` (Gemini) |
 | `VISIONTOOL_BASE_URL` | API 基础 URL | - |
 | `VISIONTOOL_TIMEOUT_MS` | 请求超时（毫秒） | `60000` |
 | `VISIONTOOL_MAX_IMAGE_BYTES` | 本地/base64 图像最大大小 | `5242880` |
 | `VISIONTOOL_RETRIES` | 429/5xx 等临时 API 故障的重试次数 | `2` |
 | `VISIONTOOL_RETRY_BASE_MS` | 指数退避重试的基础延迟 | `250` |
+| `VISIONTOOL_ALLOWED_IMAGE_ROOTS` | 限制本地图像路径必须位于这些根目录下；多个目录用系统路径分隔符分隔 | 不限制 |
+| `VISIONTOOL_DISABLE_URL_INPUTS` | 设为 `1`/`true`/`yes`/`on` 时禁用图像 URL 输入 | `false` |
+| `VISIONTOOL_ALLOWED_URL_HOSTS` | 限制图像 URL host，逗号分隔；支持 `*.example.com` | 不限制 |
+| `VISIONTOOL_ALLOW_PRIVATE_URLS` | 允许 localhost/private IP 图像 URL 被发送给上游视觉模型 | `false` |
+| `VISIONTOOL_PROXY_URL` | 网络错误后重试使用的代理 URL | `HTTP_PROXY` / `HTTPS_PROXY` / `http://127.0.0.1:7890` |
+| `VISIONTOOL_DISABLE_PROXY_FALLBACK` | 设为 `1`/`true`/`yes`/`on` 时关闭代理 fallback | `false` |
 | `VISIONTOOL_ALLOWED_CALLER_PREFIXES` | 调用者模型前缀白名单，用逗号分隔 | `glm,deepseek` |
 
 ## 调用者模型白名单
@@ -83,11 +89,56 @@ VISIONTOOL_ALLOWED_CALLER_PREFIXES=*
 
 完整配置示例请参考 [`.env.example`](.env.example) 文件。
 
+## 工具调用示例
+
+所有工具都必须传 `_caller_model`。默认只允许以 `glm` 或 `deepseek` 开头的调用者模型：
+
+```json
+{
+  "name": "describe_image",
+  "arguments": {
+    "_caller_model": "glm-4.5",
+    "image": {
+      "path": "X:/screenshots/current.png"
+    },
+    "detail": "medium",
+    "maxTokens": 1024
+  }
+}
+```
+
+工具响应会同时包含可读文本和结构化对象。结构化对象字段为：
+
+```json
+{
+  "tool": "describe_image",
+  "model": "gemini-2.5-flash",
+  "apiFormat": "gemini",
+  "text": "model response text",
+  "images": [
+    {
+      "source": "path",
+      "mediaType": "image/png",
+      "path": "X:/screenshots/current.png",
+      "bytes": 12345
+    }
+  ]
+}
+```
+
+## 图像输入安全边界
+
 - `path` - 绝对或相对本地图像路径
 - `base64` - 原始 base64 图像数据
 - `url` - 可公开访问的图像 URL
 
 支持的 MIME 类型：PNG、JPEG、WebP 和 GIF。
+
+注意：`path` 会读取 MCP 服务器进程可访问的本地文件；`url` 会把 URL 交给上游视觉模型提供商读取。生产环境建议设置 `VISIONTOOL_ALLOWED_IMAGE_ROOTS`、`VISIONTOOL_ALLOWED_URL_HOSTS`，或用 `VISIONTOOL_DISABLE_URL_INPUTS=1` 禁用 URL 输入。默认会拒绝 localhost/private IP URL；确有需要时才设置 `VISIONTOOL_ALLOW_PRIVATE_URLS=1`。
+
+## 网络与代理
+
+遇到可重试的网络错误时，服务器会先直连，再通过代理 fallback 重试。代理选择顺序为 `VISIONTOOL_PROXY_URL`、`HTTPS_PROXY`、`HTTP_PROXY`、`http://127.0.0.1:7890`。如果当前环境不需要代理 fallback，可设置 `VISIONTOOL_DISABLE_PROXY_FALLBACK=1`。
 
 ## 开发
 

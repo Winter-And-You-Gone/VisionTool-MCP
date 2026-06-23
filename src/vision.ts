@@ -1,7 +1,8 @@
 import { readFile, stat } from 'node:fs/promises';
+import http from 'node:http';
 import path from 'node:path';
 import https from 'node:https';
-import { HttpsProxyAgent } from 'hpagent';
+import { HttpProxyAgent, HttpsProxyAgent } from 'hpagent';
 
 import type {
   AnswerAboutImageInput,
@@ -87,6 +88,7 @@ type GeminiInteractionResponse = {
 };
 
 type ApiResponseBody = AnthropicMessageResponse & OpenAIChatCompletionResponse & GeminiInteractionResponse;
+type RequestAgent = http.Agent | https.Agent;
 
 const defaultAnthropicModel = 'claude-opus-4-8';
 const defaultOpenAIModel = 'gpt-4o-mini';
@@ -103,8 +105,11 @@ const retryableStatuses = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 const supportedMimeTypeSet = new Set<string>(supportedMimeTypes);
 const defaultProxyUrl = 'http://127.0.0.1:7890';
 
-// Cache proxy agent to avoid recreating it
-let proxyAgent: HttpsProxyAgent | undefined;
+// Cache proxy agents to avoid recreating them while still honoring protocol differences.
+let httpProxyAgent: HttpProxyAgent | undefined;
+let httpsProxyAgent: HttpsProxyAgent | undefined;
+let httpProxyAgentKey: string | undefined;
+let httpsProxyAgentKey: string | undefined;
 const extensionMimeTypes = new Map<string, string>([
   ['.png', 'image/png'],
   ['.jpg', 'image/jpeg'],
@@ -162,7 +167,8 @@ export async function compareImages(input: CompareImagesInput): Promise<VisionRe
 
 async function prepareImage(input: ImageInput): Promise<PreparedImage> {
   if (input.url !== undefined) {
-    return { source: 'url', url: input.url };
+    const imageUrl = validateImageUrl(input.url);
+    return { source: 'url', url: imageUrl };
   }
 
   if (input.base64 !== undefined) {
@@ -182,6 +188,7 @@ async function prepareImage(input: ImageInput): Promise<PreparedImage> {
   }
 
   const resolvedPath = path.resolve(input.path);
+  assertLocalPathAllowed(resolvedPath);
   const mediaType = input.mediaType ?? mediaTypeFromPath(resolvedPath);
   const fileStat = await stat(resolvedPath);
   if (!fileStat.isFile()) {
@@ -232,47 +239,12 @@ async function callVisionApi(
   const timeoutMs = getTimeoutMs();
   const maxAttempts = getRetryCount() + 1;
   let lastError: unknown;
-  let useProxy = true; // Default to proxy first since direct connection often times out
-  let proxyTried = true;
+  const bodyStr = JSON.stringify(buildRequestBody(config, images, prompt, maxTokens));
+  const headers = buildRequestHeaders(config);
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
-      const agent = useProxy ? getProxyAgent() : undefined;
-      const url = new URL(config.url);
-      const bodyStr = JSON.stringify(buildRequestBody(config, images, prompt, maxTokens));
-      const headers = buildRequestHeaders(config);
-
-      const response = await new Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>((resolve, reject) => {
-        const req = https.request(
-          {
-            hostname: url.hostname,
-            port: url.port,
-            path: url.pathname + url.search,
-            method: 'POST',
-            headers: {
-              ...headers,
-              'Content-Length': Buffer.byteLength(bodyStr)
-            },
-            agent,
-            timeout: timeoutMs
-          },
-          (res) => {
-            let data = '';
-            res.on('data', (chunk) => { data += chunk; });
-            res.on('end', () => {
-              resolve({
-                ok: res.statusCode !== undefined && res.statusCode >= 200 && res.statusCode < 300,
-                status: res.statusCode ?? 500,
-                json: async () => JSON.parse(data)
-              });
-            });
-          }
-        );
-
-        req.on('error', reject);
-        req.write(bodyStr);
-        req.end();
-      });
+      const response = await requestVisionApiWithFallback(config.url, bodyStr, headers, timeoutMs);
 
       const body = await readApiResponse(response);
       if (!response.ok) {
@@ -292,13 +264,10 @@ async function callVisionApi(
 
       return text;
     } catch (error) {
-      // Network errors - retry
-      if (isRetryableFetchError(error)) {
-        if (attempt < maxAttempts - 1) {
-          lastError = error;
-          await waitBeforeRetry(attempt, timeoutMs);
-          continue;
-        }
+      if (isRetryableNetworkError(error) && attempt < maxAttempts - 1) {
+        lastError = error;
+        await waitBeforeRetry(attempt, timeoutMs);
+        continue;
       }
 
       throw error;
@@ -306,6 +275,81 @@ async function callVisionApi(
   }
 
   throw lastError instanceof Error ? lastError : new Error(`${formatApiName(config.apiFormat)} API request failed after retries.`);
+}
+
+async function requestVisionApiWithFallback(
+  rawUrl: string,
+  body: string,
+  headers: Record<string, string>,
+  timeoutMs: number
+): Promise<SimpleResponse> {
+  try {
+    return await requestVisionApi(rawUrl, body, headers, timeoutMs);
+  } catch (directError) {
+    if (!isRetryableNetworkError(directError)) {
+      throw directError;
+    }
+
+    const proxyUrl = getProxyUrl();
+    if (!proxyUrl) {
+      throw directError;
+    }
+
+    try {
+      return await requestVisionApi(rawUrl, body, headers, timeoutMs, getProxyAgent(new URL(rawUrl).protocol));
+    } catch (proxyError) {
+      throw combineProxyFallbackError(directError, proxyError, proxyUrl);
+    }
+  }
+}
+
+async function requestVisionApi(
+  rawUrl: string,
+  body: string,
+  headers: Record<string, string>,
+  timeoutMs: number,
+  agent?: RequestAgent
+): Promise<SimpleResponse> {
+  const url = new URL(rawUrl);
+  const transport = url.protocol === 'http:' ? http : https;
+
+  return await new Promise<SimpleResponse>((resolve, reject) => {
+    const req = transport.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname + url.search,
+        method: 'POST',
+        headers: {
+          ...headers,
+          'Content-Length': Buffer.byteLength(body)
+        },
+        agent
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer | string) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+        res.on('end', () => {
+          const responseBody = Buffer.concat(chunks).toString('utf8');
+          resolve({
+            ok: res.statusCode !== undefined && res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode ?? 500,
+            json: async () => responseBody.length > 0 ? JSON.parse(responseBody) : {}
+          });
+        });
+      }
+    );
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(createTimeoutError(timeoutMs));
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 function buildApiConfig(modelOverride?: string): ApiConfig {
@@ -427,11 +471,12 @@ function extractResponseText(apiFormat: ApiFormat, body: ApiResponseBody): strin
   }
 
   if (apiFormat === 'gemini') {
-    return body.candidates?.[0]?.content?.parts
+    const candidateText = body.candidates?.[0]?.content?.parts
       ?.filter((part) => typeof part.text === 'string')
       .map((part) => part.text)
       .join('\n')
       .trim();
+    return candidateText || body.output_text?.trim();
   }
 
   return body.content
@@ -563,7 +608,7 @@ function inferApiFormatFromBaseUrl(rawBaseUrl: string): ApiFormat | undefined {
     if (pathName.endsWith('/messages') || hostName === 'api.anthropic.com' || hostName.endsWith('.anthropic.com')) {
       return 'anthropic';
     }
-    if (pathName.endsWith('/interactions') || hostName === 'generativelanguage.googleapis.com' || hostName.endsWith('.googleapis.com')) {
+    if (pathName.endsWith(':generatecontent') || hostName === 'generativelanguage.googleapis.com' || hostName.endsWith('.googleapis.com')) {
       return 'gemini';
     }
     return undefined;
@@ -616,9 +661,15 @@ function buildApiUrl(apiFormat: ApiFormat, model?: string): string {
   if (url.search || url.hash) {
     throw new Error('VISIONTOOL_BASE_URL must not include query strings or fragments.');
   }
+  if (apiFormat === 'gemini' && url.pathname.replace(/\/+$/u, '').toLowerCase().endsWith('/interactions')) {
+    throw new Error('Gemini VISIONTOOL_BASE_URL must use the generateContent API, for example https://generativelanguage.googleapis.com/v1beta or https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent.');
+  }
 
   const baseUrl = url.toString().replace(/\/+$/u, '');
   const endpoint = getEndpointPath(apiFormat, model);
+  if (apiFormat === 'gemini' && baseUrl.toLowerCase().endsWith(':generatecontent')) {
+    return baseUrl;
+  }
   if (baseUrl.endsWith(`/${endpoint}`)) {
     return baseUrl;
   }
@@ -708,10 +759,43 @@ async function waitBeforeRetry(attempt: number, timeoutMs: number): Promise<void
   });
 }
 
-function getProxyAgent(): HttpsProxyAgent {
-  if (!proxyAgent) {
-    proxyAgent = new HttpsProxyAgent({
-      proxy: process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY ?? defaultProxyUrl,
+function getProxyUrl(): string | undefined {
+  if (isTruthyEnv(process.env.VISIONTOOL_DISABLE_PROXY_FALLBACK)) {
+    return undefined;
+  }
+  return process.env.VISIONTOOL_PROXY_URL?.trim()
+    || process.env.HTTPS_PROXY?.trim()
+    || process.env.HTTP_PROXY?.trim()
+    || defaultProxyUrl;
+}
+
+function getProxyAgent(protocol: string): RequestAgent {
+  const proxy = getProxyUrl();
+  if (!proxy) {
+    throw new Error('Proxy fallback is disabled.');
+  }
+  const options = {
+    proxy,
+    keepAlive: true,
+    keepAliveMsecs: 1000,
+    maxSockets: 10,
+    maxFreeSockets: 2,
+    scheduling: 'lifo' as const,
+    timeout: getTimeoutMs()
+  };
+
+  const cacheKey = `${proxy}|${getTimeoutMs()}`;
+  if (protocol === 'http:') {
+    if (!httpProxyAgent || httpProxyAgentKey !== cacheKey) {
+      httpProxyAgent = new HttpProxyAgent(options);
+      httpProxyAgentKey = cacheKey;
+    }
+    return httpProxyAgent;
+  }
+
+  if (!httpsProxyAgent || httpsProxyAgentKey !== cacheKey) {
+    httpsProxyAgent = new HttpsProxyAgent({
+      proxy,
       keepAlive: true,
       keepAliveMsecs: 1000,
       maxSockets: 10,
@@ -719,18 +803,160 @@ function getProxyAgent(): HttpsProxyAgent {
       scheduling: 'lifo',
       timeout: getTimeoutMs()
     });
+    httpsProxyAgentKey = cacheKey;
   }
-  return proxyAgent;
+  return httpsProxyAgent;
 }
 
-function isRetryableFetchError(error: unknown): boolean {
-  return error instanceof TypeError;
+function assertLocalPathAllowed(resolvedPath: string): void {
+  const rawRoots = process.env.VISIONTOOL_ALLOWED_IMAGE_ROOTS?.trim();
+  if (!rawRoots) {
+    return;
+  }
+
+  const roots = rawRoots
+    .split(path.delimiter)
+    .map((root) => root.trim())
+    .filter(Boolean)
+    .map((root) => path.resolve(root));
+  if (roots.length === 0) {
+    return;
+  }
+
+  const allowed = roots.some((root) => isPathWithinRoot(resolvedPath, root));
+  if (!allowed) {
+    throw new Error(`Image path is outside VISIONTOOL_ALLOWED_IMAGE_ROOTS: ${resolvedPath}`);
+  }
 }
 
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
+function isPathWithinRoot(targetPath: string, rootPath: string): boolean {
+  const normalizedTarget = normalizePathForCompare(targetPath);
+  const normalizedRoot = normalizePathForCompare(rootPath);
+  const relative = path.relative(normalizedRoot, normalizedTarget);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function normalizePathForCompare(value: string): string {
+  const normalized = path.resolve(value);
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function validateImageUrl(value: string): string {
+  if (isTruthyEnv(process.env.VISIONTOOL_DISABLE_URL_INPUTS)) {
+    throw new Error('URL image input is disabled by VISIONTOOL_DISABLE_URL_INPUTS.');
+  }
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`Image URL must be a valid URL. Received: ${value}`);
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`Image URL must use http or https. Received: ${value}`);
+  }
+
+  const allowedHosts = parseAllowedUrlHosts();
+  if (allowedHosts.length > 0 && !allowedHosts.some((host) => hostMatches(url.hostname, host))) {
+    throw new Error(`Image URL host "${url.hostname}" is not allowed by VISIONTOOL_ALLOWED_URL_HOSTS.`);
+  }
+
+  if (!isTruthyEnv(process.env.VISIONTOOL_ALLOW_PRIVATE_URLS) && isPrivateOrLocalHost(url.hostname)) {
+    throw new Error(`Image URL host "${url.hostname}" looks private or local. Set VISIONTOOL_ALLOW_PRIVATE_URLS=1 only if sending this URL to the upstream vision provider is intentional.`);
+  }
+
+  return url.toString();
+}
+
+function parseAllowedUrlHosts(): string[] {
+  return (process.env.VISIONTOOL_ALLOWED_URL_HOSTS ?? '')
+    .split(',')
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function hostMatches(hostname: string, allowedHost: string): boolean {
+  const host = stripIpv6Brackets(hostname).toLowerCase();
+  const allowed = stripIpv6Brackets(allowedHost).toLowerCase();
+  if (allowed.startsWith('*.')) {
+    const suffix = allowed.slice(1);
+    return host.endsWith(suffix) && host.length > suffix.length;
+  }
+  return host === allowed;
+}
+
+function isPrivateOrLocalHost(hostname: string): boolean {
+  const host = stripIpv6Brackets(hostname).toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost') || host === '0.0.0.0' || host === '::' || host === '::1') {
+    return true;
+  }
+
+  const ipv4Parts = host.split('.');
+  if (ipv4Parts.length === 4 && ipv4Parts.every((part) => /^\d+$/u.test(part))) {
+    const octets = ipv4Parts.map((part) => Number.parseInt(part, 10));
+    if (octets.some((octet) => octet < 0 || octet > 255)) {
+      return false;
+    }
+    const first = octets[0];
+    const second = octets[1];
+    if (first === undefined || second === undefined) {
+      return false;
+    }
+    return first === 10
+      || first === 127
+      || first === 0
+      || (first === 169 && second === 254)
+      || (first === 172 && second >= 16 && second <= 31)
+      || (first === 192 && second === 168);
+  }
+
+  return host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80:');
+}
+
+function stripIpv6Brackets(hostname: string): string {
+  return hostname.replace(/^\[/u, '').replace(/\]$/u, '');
+}
+
+function isTruthyEnv(value: string | undefined): boolean {
+  if (value === undefined) {
+    return false;
+  }
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+function isRetryableNetworkError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const code = (error as NodeJS.ErrnoException).code;
+  if (typeof code === 'string' && ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH'].includes(code)) {
+    return true;
+  }
+
+  return error.name === 'AbortError' || error.name === 'TimeoutError' || error.message.includes('timed out after');
+}
+
+function combineProxyFallbackError(directError: unknown, proxyError: unknown, proxyUrl: string): Error {
+  const directMessage = directError instanceof Error ? directError.message : String(directError);
+  const proxyMessage = proxyError instanceof Error ? proxyError.message : String(proxyError);
+  const error = new Error(`${directMessage} Retried through proxy ${proxyUrl} but it also failed: ${proxyMessage}`) as NodeJS.ErrnoException;
+  error.code = getErrorCode(proxyError) ?? getErrorCode(directError);
+  if (proxyError instanceof Error) {
+    error.name = proxyError.name;
+  }
+  return error;
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+  return typeof code === 'string' ? code : undefined;
 }
 
 function createTimeoutError(timeoutMs: number): Error {
-  return new Error(`Vision API request timed out after ${timeoutMs}ms.`);
+  const error = new Error(`Vision API request timed out after ${timeoutMs}ms.`) as NodeJS.ErrnoException;
+  error.name = 'TimeoutError';
+  error.code = 'ETIMEDOUT';
+  return error;
 }
