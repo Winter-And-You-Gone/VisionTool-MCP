@@ -703,3 +703,59 @@ test('describeImage requires ANTHROPIC_API_KEY', async () => {
     /ANTHROPIC_API_KEY is required/
   );
 });
+
+test('describeImage falls back to reasoning_content when content is empty (OpenAI reasoning models)', async () => {
+  resetEnv();
+  delete process.env.ANTHROPIC_API_KEY;
+  process.env.OPENAI_API_KEY = 'openai-key';
+  process.env.VISIONTOOL_API_FORMAT = 'openai';
+  process.env.VISIONTOOL_MODEL = 'minimax-m3';
+  const rawBase64 = Buffer.from('openai-image').toString('base64');
+
+  await withMockVisionServer(
+    () => ({ body: { choices: [{ message: { content: null, reasoning_content: 'reasoned answer' }, finish_reason: 'stop' }] } }),
+    async ({ baseUrl }) => {
+      process.env.VISIONTOOL_BASE_URL = `${baseUrl}/v1`;
+
+      const value = await describeImage({
+        image: { base64: rawBase64, mediaType: 'image/png' },
+        detail: 'low',
+        maxTokens: 256
+      });
+
+      assert.equal(value.text, 'reasoned answer');
+    }
+  );
+});
+
+test('describeImage reports diagnostic details when OpenAI API returns no text content', async () => {
+  resetEnv();
+  delete process.env.ANTHROPIC_API_KEY;
+  process.env.OPENAI_API_KEY = 'openai-key';
+  process.env.VISIONTOOL_API_FORMAT = 'openai';
+  process.env.VISIONTOOL_MODEL = 'minimax-m3';
+  const rawBase64 = Buffer.from('openai-image').toString('base64');
+
+  await withMockVisionServer(
+    () => ({ body: { choices: [{ message: { content: null, reasoning_content: null }, finish_reason: 'stop' }] } }),
+    async ({ baseUrl }) => {
+      process.env.VISIONTOOL_BASE_URL = `${baseUrl}/v1`;
+
+      let caught: Error | undefined;
+      try {
+        await describeImage({
+          image: { base64: rawBase64, mediaType: 'image/png' },
+          detail: 'low',
+          maxTokens: 256
+        });
+      } catch (err) {
+        caught = err as Error;
+      }
+
+      assert.ok(caught, 'expected describeImage to reject with a no-text-content error');
+      assert.match(caught!.message, /OpenAI-compatible API returned no text content/);
+      assert.match(caught!.message, /finish_reason: stop/);
+      assert.match(caught!.message, /response body:/);
+    }
+  );
+});

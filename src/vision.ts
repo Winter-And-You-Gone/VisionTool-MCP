@@ -96,8 +96,10 @@ type AnthropicMessageResponse = {
 type OpenAIChatCompletionResponse = {
   choices?: Array<{
     message?: {
-      content?: string | Array<{ type?: string; text?: string }>;
+      content?: string | Array<{ type?: string; text?: string }> | null;
+      reasoning_content?: string | null;
     };
+    finish_reason?: string | null;
   }>;
   error?: { message?: string };
 };
@@ -501,7 +503,7 @@ async function callVisionApi(
 
       const text = extractResponseText(config.apiFormat, body);
       if (!text) {
-        throw new Error(`${formatApiName(config.apiFormat)} API returned no text content.`);
+        throw new Error(buildEmptyContentError(config.apiFormat, body));
       }
 
       return text;
@@ -701,15 +703,22 @@ async function readApiResponse(response: SimpleResponse): Promise<ApiResponseBod
 
 function extractResponseText(apiFormat: ApiFormat, body: ApiResponseBody): string | undefined {
   if (apiFormat === 'openai') {
-    const content = body.choices?.[0]?.message?.content;
+    const message = body.choices?.[0]?.message;
+    const content = message?.content;
+    let text: string | undefined;
     if (typeof content === 'string') {
-      return content.trim();
+      text = content.trim();
+    } else if (Array.isArray(content)) {
+      text = content
+        .filter((block) => block.type === 'text' && typeof block.text === 'string')
+        .map((block) => block.text)
+        .join('\n')
+        .trim();
     }
-    return content
-      ?.filter((block) => block.type === 'text' && typeof block.text === 'string')
-      .map((block) => block.text)
-      .join('\n')
-      .trim();
+    if (!text && typeof message?.reasoning_content === 'string') {
+      text = message.reasoning_content.trim();
+    }
+    return text;
   }
 
   if (apiFormat === 'gemini') {
@@ -726,6 +735,29 @@ function extractResponseText(apiFormat: ApiFormat, body: ApiResponseBody): strin
     .map((block) => block.text)
     .join('\n')
     .trim();
+}
+
+function buildEmptyContentError(apiFormat: ApiFormat, body: ApiResponseBody): string {
+  const parts = [`${formatApiName(apiFormat)} API returned no text content.`];
+  const finishReason = body.choices?.[0]?.finish_reason;
+  if (typeof finishReason === 'string' && finishReason.length > 0) {
+    parts.push(`finish_reason: ${finishReason}`);
+  }
+  const errorMessage = body.error?.message;
+  if (typeof errorMessage === 'string' && errorMessage.length > 0) {
+    parts.push(`error: ${errorMessage}`);
+  }
+  let bodySnippet: string;
+  try {
+    bodySnippet = JSON.stringify(body) ?? '';
+  } catch {
+    bodySnippet = String(body);
+  }
+  if (bodySnippet.length > 500) {
+    bodySnippet = `${bodySnippet.slice(0, 500)}…`;
+  }
+  parts.push(`response body: ${bodySnippet}`);
+  return parts.join(' ');
 }
 
 function toAnthropicImageBlock(image: PreparedImage): AnthropicContentBlock {
