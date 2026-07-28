@@ -21,7 +21,13 @@ import {
   compareImagesSchema,
   describeImageSchema,
   ocrImageSchema,
+  opencodePastedImageResultOutputSchema,
+  opencodePastedImageSchema,
+  opencodePastedImageToolInputSchema,
   toolInputSchemas,
+  uploadImageSchema,
+  uploadImageToolInputSchema,
+  uploadImageResultOutputSchema,
   visionResultOutputSchema
 } from './schemas.js';
 import {
@@ -29,7 +35,12 @@ import {
   compareImages,
   describeImage,
   ocrImage,
-  type VisionResult
+  opencodeEnabled,
+  opencodePastedImage,
+  type VisionResult,
+  type UploadResult,
+  type OpencodePastedImageResult,
+  uploadImage
 } from './vision.js';
 
 const moduleRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -85,11 +96,18 @@ export function createVisionToolServer(): Server {
     }
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async (): Promise<ListToolsResult> => ({
-    tools: [
+  server.setRequestHandler(ListToolsRequestSchema, async (): Promise<ListToolsResult> => {
+    const tools: Tool[] = [
+      {
+        name: 'upload_image',
+        description: '【默认仅限 GLM/DeepSeek 系列模型调用】Upload an image via base64 for later use with other vision tools. Auto-deleted after 30 minutes.',
+        inputSchema: asInputSchema(uploadImageToolInputSchema),
+        outputSchema: asOutputSchema(uploadImageResultOutputSchema),
+        annotations: { ...visionToolAnnotations, title: 'Upload Image' }
+      },
       {
         name: 'describe_image',
-        description: '【默认仅限 GLM/DeepSeek 系列模型调用】Describe an image for a text-only agent. Accepts a local path, base64 image data, or URL.',
+        description: '【默认仅限 GLM/DeepSeek 系列模型调用】Describe an image for a text-only agent. Accepts a local path, base64 image data, URL, or imageId from upload_image.',
         inputSchema: asInputSchema(toolInputSchemas.describe_image),
         outputSchema: asOutputSchema(visionResultOutputSchema),
         annotations: { ...visionToolAnnotations, title: 'Describe Image' }
@@ -115,8 +133,20 @@ export function createVisionToolServer(): Server {
         outputSchema: asOutputSchema(visionResultOutputSchema),
         annotations: { ...visionToolAnnotations, title: 'Compare Images' }
       }
-    ]
-  }));
+    ];
+
+    if (opencodeEnabled()) {
+      tools.push({
+        name: 'opencode_pasted_image',
+        description: '【opencode 专属】Extract the most recently pasted image from the current opencode session database and return an imageId/path for use with describe_image / ocr_image / answer_about_image / compare_images. opencode stores pasted images inline as base64 in opencode.db (never written to disk), and text-only caller models cannot receive the image attachment directly. This tool reads the active session (highest session.time_updated), finds the latest image part in that session only, decodes it, and registers it as an upload. It does NOT fall back to other sessions. Only registered when VISIONTOOL_ENABLE_OPENCODE=1 or VISIONTOOL_OPENCODE_DB is set.',
+        inputSchema: asInputSchema(opencodePastedImageToolInputSchema),
+        outputSchema: asOutputSchema(opencodePastedImageResultOutputSchema),
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, title: 'opencode Pasted Image' }
+      });
+    }
+
+    return { tools };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => handleToolCall(request.params.name, request.params.arguments));
   return server;
@@ -135,6 +165,8 @@ async function handleToolCall(name: string, args: unknown): Promise<CallToolResu
     assertCallerAllowed(callerModel);
 
     switch (name) {
+      case 'upload_image':
+        return jsonUploadResult(await uploadImage(parseArgs(uploadImageSchema, args)));
       case 'describe_image':
         return jsonResult(await describeImage(parseArgs(describeImageSchema, args)));
       case 'ocr_image':
@@ -143,6 +175,14 @@ async function handleToolCall(name: string, args: unknown): Promise<CallToolResu
         return jsonResult(await answerAboutImage(parseArgs(answerAboutImageSchema, args)));
       case 'compare_images':
         return jsonResult(await compareImages(parseArgs(compareImagesSchema, args)));
+      case 'opencode_pasted_image':
+        if (!opencodeEnabled()) {
+          throw new McpError(
+            ErrorCode.MethodNotFound,
+            'opencode_pasted_image is not enabled. Set VISIONTOOL_ENABLE_OPENCODE=1 or VISIONTOOL_OPENCODE_DB to the opencode.db path to enable it.'
+          );
+        }
+        return jsonOpencodeResult(await opencodePastedImage(parseArgs(opencodePastedImageSchema, args)));
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
@@ -180,6 +220,30 @@ function asOutputSchema(schema: unknown): NonNullable<Tool['outputSchema']> {
 }
 
 function jsonResult(value: VisionResult): CallToolResult {
+  return {
+    structuredContent: value as unknown as Record<string, unknown>,
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(value, null, 2)
+      }
+    ]
+  };
+}
+
+function jsonUploadResult(value: UploadResult): CallToolResult {
+  return {
+    structuredContent: value as unknown as Record<string, unknown>,
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(value, null, 2)
+      }
+    ]
+  };
+}
+
+function jsonOpencodeResult(value: OpencodePastedImageResult): CallToolResult {
   return {
     structuredContent: value as unknown as Record<string, unknown>,
     content: [

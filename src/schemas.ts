@@ -6,19 +6,33 @@ export const detailLevels = ['low', 'medium', 'high'] as const;
 const maxPromptLength = 8000;
 const maxBase64Length = 8_000_000;
 const maxUrlLength = 4096;
+const maxImageIdLength = 128;
 
 const imagePathInputSchema = z.object({
   path: z.string().min(1).optional(),
   base64: z.string().min(1).max(maxBase64Length).optional(),
   url: z.string().url().max(maxUrlLength).optional(),
+  imageId: z.string().min(1).max(maxImageIdLength).optional(),
   mediaType: z.enum(supportedMimeTypes).optional()
 }).strict().refine(
-  (value) => [value.path, value.base64, value.url].filter((item) => item !== undefined).length === 1,
-  'Provide exactly one of path, base64, or url.'
+  (value) => [value.path, value.base64, value.url, value.imageId].filter((item) => item !== undefined).length === 1,
+  'Provide exactly one of path, base64, url, or imageId.'
 ).refine(
   (value) => value.base64 === undefined || value.mediaType !== undefined,
   'mediaType is required when base64 is provided.'
 );
+
+export const uploadImageSchema = z.object({
+  base64: z.string().min(1).max(maxBase64Length),
+  mediaType: z.enum(supportedMimeTypes),
+  filename: z.string().min(1).max(255).optional(),
+  _caller_model: z.string().min(1)
+}).strict();
+
+export const opencodePastedImageSchema = z.object({
+  _caller_model: z.string().min(1)
+}).strict();
+export type OpencodePastedImageInput = z.infer<typeof opencodePastedImageSchema>;
 
 const commonVisionOptionsSchema = z.object({
   detail: z.enum(detailLevels).optional().default('medium'),
@@ -71,6 +85,7 @@ export type DescribeImageInput = z.infer<typeof describeImageSchema>;
 export type OcrImageInput = z.infer<typeof ocrImageSchema>;
 export type AnswerAboutImageInput = z.infer<typeof answerAboutImageSchema>;
 export type CompareImagesInput = z.infer<typeof compareImagesSchema>;
+export type UploadImageInput = z.infer<typeof uploadImageSchema>;
 
 const imageInputSchema = {
   type: 'object',
@@ -78,12 +93,14 @@ const imageInputSchema = {
     path: { type: 'string', description: 'Local image path. Relative paths resolve from the MCP server working directory.' },
     base64: { type: 'string', description: 'Raw base64-encoded image data.' },
     url: { type: 'string', format: 'uri', description: 'Publicly reachable image URL.' },
+    imageId: { type: 'string', description: 'Image ID returned by upload_image tool. Use this for images previously uploaded.' },
     mediaType: { type: 'string', enum: supportedMimeTypes, description: 'Required for base64 input. Optional for path input when the extension is ambiguous.' }
   },
   oneOf: [
     { required: ['path'] },
     { required: ['base64', 'mediaType'] },
-    { required: ['url'] }
+    { required: ['url'] },
+    { required: ['imageId'] }
   ],
   additionalProperties: false
 } as const;
@@ -169,4 +186,55 @@ export const toolInputSchemas = {
     required: ['firstImage', 'secondImage', '_caller_model'],
     additionalProperties: false
   }
+} as const;
+
+export const uploadImageToolInputSchema = {
+  type: 'object',
+  properties: {
+    base64: { type: 'string', description: 'Raw base64-encoded image data.' },
+    mediaType: { type: 'string', enum: supportedMimeTypes, description: 'Image MIME type.' },
+    filename: { type: 'string', description: 'Optional filename for reference (optional).' },
+    ...commonProperties
+  },
+  required: ['base64', 'mediaType', '_caller_model'],
+  additionalProperties: false
+} as const;
+
+export const uploadImageResultOutputSchema = {
+  type: 'object',
+  properties: {
+    tool: { type: 'string', description: 'Tool that produced this result.' },
+    imageId: { type: 'string', description: 'Image ID to use in subsequent vision calls.' },
+    path: { type: 'string', description: 'Local path where the image was saved.' },
+    bytes: { type: 'integer', minimum: 0, description: 'Image size in bytes.' },
+    expiresAt: { type: 'string', description: 'ISO timestamp when the image will be auto-deleted.' }
+  },
+  required: ['tool', 'imageId', 'path', 'bytes', 'expiresAt'],
+  additionalProperties: false
+} as const;
+
+export const opencodePastedImageToolInputSchema = {
+  type: 'object',
+  properties: {
+    _caller_model: commonProperties._caller_model
+  },
+  required: ['_caller_model'],
+  additionalProperties: false
+} as const;
+
+export const opencodePastedImageResultOutputSchema = {
+  type: 'object',
+  properties: {
+    tool: { type: 'string', description: 'Tool that produced this result.' },
+    imageId: { type: 'string', description: 'Image ID to use in subsequent vision calls (describe_image, ocr_image, answer_about_image, compare_images).' },
+    path: { type: 'string', description: 'Local path where the extracted image was saved.' },
+    bytes: { type: 'integer', minimum: 0, description: 'Image size in bytes.' },
+    mediaType: { type: 'string', description: 'Detected image MIME type.' },
+    filename: { type: 'string', description: 'Original filename from the opencode part, if any.', nullable: true },
+    sessionId: { type: 'string', description: 'opencode session ID the image was read from.' },
+    timeCreated: { type: 'integer', description: 'Epoch milliseconds when the image part was created in opencode.' },
+    expiresAt: { type: 'string', description: 'ISO timestamp when the extracted image will be auto-deleted.' }
+  },
+  required: ['tool', 'imageId', 'path', 'bytes', 'mediaType', 'filename', 'sessionId', 'timeCreated', 'expiresAt'],
+  additionalProperties: false
 } as const;

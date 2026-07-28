@@ -93,11 +93,15 @@ test('tools/list exposes output schemas and safety annotations', async () => {
 
   await withMcpClient(async (client) => {
     const result = await client.listTools();
-    assert.equal(result.tools.length, 4);
+    assert.equal(result.tools.length, 5);
 
     for (const tool of result.tools) {
       assert.equal(tool.outputSchema?.type, 'object');
-      assert.deepEqual(tool.outputSchema?.required, ['tool', 'model', 'apiFormat', 'text', 'images']);
+      if (tool.name === 'upload_image') {
+        assert.deepEqual(tool.outputSchema?.required, ['tool', 'imageId', 'path', 'bytes', 'expiresAt']);
+      } else {
+        assert.deepEqual(tool.outputSchema?.required, ['tool', 'model', 'apiFormat', 'text', 'images']);
+      }
       assert.equal(tool.annotations?.readOnlyHint, true);
       assert.equal(tool.annotations?.destructiveHint, false);
       assert.equal(tool.annotations?.idempotentHint, true);

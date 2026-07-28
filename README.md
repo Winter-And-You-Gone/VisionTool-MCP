@@ -4,6 +4,7 @@ VisionToolMCP 是一个 MCP 服务器，为纯文本 Agent 提供视觉能力桥
 
 ## 功能特性
 
+- 📤 **图像上传** - 通过 base64 上传图像，获得 `imageId` 可重复使用，30 分钟自动清理
 - 🔍 **图像描述** - 描述图像内容，支持可选的聚焦/指令引导
 - 📝 **文字识别 (OCR)** - 从图像中提取可见文本
 - ❓ **图像问答** - 回答关于单张图像的特定问题
@@ -69,6 +70,9 @@ VISIONTOOL_API_FORMAT=gemini VISIONTOOL_API_KEY=你的密钥 npm run dev
 | `VISIONTOOL_PROXY_URL` | 网络错误后重试使用的代理 URL | `HTTP_PROXY` / `HTTPS_PROXY` / `http://127.0.0.1:7890` |
 | `VISIONTOOL_DISABLE_PROXY_FALLBACK` | 设为 `1`/`true`/`yes`/`on` 时关闭代理 fallback | `false` |
 | `VISIONTOOL_ALLOWED_CALLER_PREFIXES` | 调用者模型前缀白名单，用逗号分隔 | `glm,deepseek` |
+| `VISIONTOOL_UPLOAD_TTL_MS` | 上传图像的自动过期时间（毫秒） | `1800000` (30 分钟) |
+| `VISIONTOOL_ENABLE_OPENCODE` | 设为 `1`/`true`/`yes`/`on` 时启用 opencode 专属的 `opencode_pasted_image` 工具（自动检测 `~/.local/share/opencode/opencode.db`） | `false` |
+| `VISIONTOOL_OPENCODE_DB` | 显式指定 opencode 数据库路径；设置后同样启用 `opencode_pasted_image` 工具 | - |
 
 ## 调用者模型白名单
 
@@ -89,9 +93,101 @@ VISIONTOOL_ALLOWED_CALLER_PREFIXES=*
 
 完整配置示例请参考 [`.env.example`](.env.example) 文件。
 
+## opencode 专属：opencode_pasted_image
+
+这是一个**仅 opencode 适用**的工具，默认不注册。当 MCP 服务运行在 opencode 会话内时，设置 `VISIONTOOL_ENABLE_OPENCODE=1`（或 `VISIONTOOL_OPENCODE_DB=<opencode.db 路径>`）即可启用。
+
+**为什么需要它**：在 opencode 中粘贴的图片以 base64 data URL 内联存储在 `opencode.db` 的 `part` 表里，**不落盘**。纯文本调用模型（如 GLM/DeepSeek）接不到图片附件，会报 `Cannot read "image.png" (this model does not support image input)`，图片被丢弃。该工具直接从数据库里把"当前会话最新一张粘贴图"取出来，解码落盘并注册为上传，返回 `imageId`/`path` 供其它视觉工具使用。
+
+**会话识别**：用"最新一条 `message` 所属的 session"作为当前会话（比 `session.time_updated` 更可靠，后者会被 UI 选中事件刷新）。只在当前会话内取最新图片，**不会跨会话兜底**——当前会话没有粘贴图时会直接报错，避免拿错别的对话的图。
+
+**用法**：
+
+```json
+{
+  "name": "opencode_pasted_image",
+  "arguments": { "_caller_model": "glm-5.2" }
+}
+```
+
+响应：
+
+```json
+{
+  "tool": "opencode_pasted_image",
+  "imageId": "6b49d277-c27d-434c-8e52-8601c8f5a1fb",
+  "path": "C:\\...\\visiontool-mcp-uploads\\image.png",
+  "bytes": 356351,
+  "mediaType": "image/png",
+  "filename": "image.png",
+  "sessionId": "ses_xxx",
+  "timeCreated": 1785249912775,
+  "expiresAt": "2026-07-28T15:31:08.235Z"
+}
+```
+
+然后用 `imageId` 调用其它工具：
+
+```json
+{
+  "name": "describe_image",
+  "arguments": {
+    "_caller_model": "glm-5.2",
+    "image": { "imageId": "6b49d277-c27d-434c-8e52-8601c8f5a1fb" }
+  }
+}
+```
+
+依赖 Node 22.5+ 内置的 `node:sqlite`（运行时动态导入，不可用时该工具会清晰报错，不影响其它工具）。其它 agent 平台（无 opencode 数据库）请勿启用。
+
 ## 工具调用示例
 
 所有工具都必须传 `_caller_model`。默认只允许以 `glm` 或 `deepseek` 开头的调用者模型：
+
+### 图像上传（推荐）
+
+对于对话中的截图或 Agent 自己生成的图像，先上传获得 `imageId` 可多次使用，30 分钟后自动清理：
+
+```json
+{
+  "name": "upload_image",
+  "arguments": {
+    "_caller_model": "glm-4.5",
+    "base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+    "mediaType": "image/png",
+    "filename": "screenshot"
+  }
+}
+```
+
+响应：
+```json
+{
+  "tool": "upload_image",
+  "imageId": "550e8400-e29b-41d4-a716-446655440000",
+  "path": "/tmp/visiontool-mcp-uploads/screenshot.png",
+  "bytes": 1234,
+  "expiresAt": "2024-06-25T03:30:00.000Z"
+}
+```
+
+然后用 `imageId` 调用其他工具：
+
+```json
+{
+  "name": "describe_image",
+  "arguments": {
+    "_caller_model": "glm-4.5",
+    "image": {
+      "imageId": "550e8400-e29b-41d4-a716-446655440000"
+    }
+  }
+}
+```
+
+### 其他输入方式
+
+也支持 `path`（本地文件）、`base64`（直接传数据）或 `url`（公开 URL）：
 
 ```json
 {
@@ -128,6 +224,7 @@ VISIONTOOL_ALLOWED_CALLER_PREFIXES=*
 
 ## 图像输入安全边界
 
+- `imageId` - 通过 `upload_image` 返回的 ID，30 分钟自动清理（推荐，最安全）
 - `path` - 绝对或相对本地图像路径
 - `base64` - 原始 base64 图像数据
 - `url` - 可公开访问的图像 URL

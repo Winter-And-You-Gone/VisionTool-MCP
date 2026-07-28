@@ -1,6 +1,9 @@
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, writeFile, mkdir, unlink, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import https from 'node:https';
 import { HttpProxyAgent, HttpsProxyAgent } from 'hpagent';
 
@@ -9,9 +12,31 @@ import type {
   CompareImagesInput,
   DescribeImageInput,
   ImageInput,
-  OcrImageInput
+  OcrImageInput,
+  OpencodePastedImageInput,
+  UploadImageInput
 } from './schemas.js';
 import { supportedMimeTypes } from './schemas.js';
+
+export type UploadResult = {
+  tool: 'upload_image';
+  imageId: string;
+  path: string;
+  bytes: number;
+  expiresAt: string;
+};
+
+export type OpencodePastedImageResult = {
+  tool: 'opencode_pasted_image';
+  imageId: string;
+  path: string;
+  bytes: number;
+  mediaType: string;
+  filename: string | null;
+  sessionId: string;
+  timeCreated: number;
+  expiresAt: string;
+};
 
 export type VisionResult = {
   tool: string;
@@ -118,6 +143,204 @@ const extensionMimeTypes = new Map<string, string>([
   ['.gif', 'image/gif']
 ]);
 
+// Uploaded image store with TTL cleanup
+const uploadedImages = new Map<string, { path: string; expiresAt: Date }>();
+const uploadedImagesDir = path.join(os.tmpdir(), 'visiontool-mcp-uploads');
+const defaultUploadTtlMs = 30 * 60 * 1000; // 30 minutes
+
+async function ensureUploadDir(): Promise<string> {
+  if (!existsSync(uploadedImagesDir)) {
+    await mkdir(uploadedImagesDir, { recursive: true, mode: 0o700 });
+  }
+  return uploadedImagesDir;
+}
+
+export async function uploadImage(input: UploadImageInput): Promise<UploadResult> {
+  const data = normalizeBase64(input.base64);
+  const buffer = Buffer.from(data, 'base64');
+  const { imageId, path: imagePath, bytes, expiresAt } = await registerUpload(buffer, input.mediaType, input.filename);
+  return { tool: 'upload_image', imageId, path: imagePath, bytes, expiresAt: expiresAt.toISOString() };
+}
+
+async function registerUpload(buffer: Buffer, mediaType: string, filename?: string): Promise<{
+  imageId: string;
+  path: string;
+  bytes: number;
+  expiresAt: Date;
+}> {
+  const bytes = buffer.length;
+  assertImageSize(bytes);
+
+  const imageId = crypto.randomUUID();
+  const ext = extensionFromMediaType(mediaType) || '.bin';
+  const uploadDir = await ensureUploadDir();
+  const name = filename ? sanitizeFilename(filename) : imageId;
+  const hasExt = ext.length > 0 && name.toLowerCase().endsWith(ext.toLowerCase());
+  const imagePath = path.join(uploadDir, hasExt ? name : `${name}${ext}`);
+
+  await writeFile(imagePath, buffer, { mode: 0o600 });
+
+  const ttlMs = parsePositiveIntEnv('VISIONTOOL_UPLOAD_TTL_MS', defaultUploadTtlMs);
+  const expiresAt = new Date(Date.now() + ttlMs);
+
+  uploadedImages.set(imageId, { path: imagePath, expiresAt });
+
+  setTimeout(() => cleanUpExpiredUploads(), ttlMs + 1000).unref();
+
+  return { imageId, path: imagePath, bytes, expiresAt };
+}
+
+function sanitizeFilename(filename: string): string {
+  return filename.replace(/[^a-zA-Z0-9_.-]/gu, '_');
+}
+
+function extensionFromMediaType(mediaType: string): string | undefined {
+  for (const [ext, type] of extensionMimeTypes) {
+    if (type === mediaType) {
+      return ext;
+    }
+  }
+  return undefined;
+}
+
+async function cleanUpExpiredUploads(): Promise<void> {
+  const now = new Date();
+  const toDelete: string[] = [];
+
+  for (const [imageId, info] of uploadedImages) {
+    if (info.expiresAt <= now) {
+      toDelete.push(imageId);
+      try {
+        await unlink(info.path);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  }
+
+  toDelete.forEach((id) => uploadedImages.delete(id));
+}
+
+async function resolveImageId(imageId: string): Promise<string> {
+  await cleanUpExpiredUploads();
+
+  const info = uploadedImages.get(imageId);
+  if (!info) {
+    throw new Error(`Image ID "${imageId}" not found or expired.`);
+  }
+
+  if (info.expiresAt <= new Date()) {
+    uploadedImages.delete(imageId);
+    throw new Error(`Image ID "${imageId}" has expired.`);
+  }
+
+  return info.path;
+}
+
+export async function cleanUpAllUploads(): Promise<void> {
+  try {
+    if (existsSync(uploadedImagesDir)) {
+      await rm(uploadedImagesDir, { recursive: true, force: true });
+    }
+    uploadedImages.clear();
+  } catch {
+    // Ignore cleanup errors
+  }
+}
+
+export function opencodeEnabled(): boolean {
+  if (isTruthyEnv(process.env.VISIONTOOL_ENABLE_OPENCODE)) {
+    return true;
+  }
+  return (process.env.VISIONTOOL_OPENCODE_DB?.trim() ?? '').length > 0;
+}
+
+function getOpencodeDbPath(): string {
+  const explicit = process.env.VISIONTOOL_OPENCODE_DB?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  return path.join(os.homedir(), '.local', 'share', 'opencode', 'opencode.db');
+}
+
+export async function opencodePastedImage(_input: OpencodePastedImageInput): Promise<OpencodePastedImageResult> {
+  const dbPath = getOpencodeDbPath();
+  if (!existsSync(dbPath)) {
+    throw new Error(
+      `opencode database not found at ${dbPath}. Set VISIONTOOL_OPENCODE_DB to the correct opencode.db path, or unset VISIONTOOL_ENABLE_OPENCODE. The opencode_pasted_image tool is opencode-specific and only works inside an opencode session.`
+    );
+  }
+
+  let DatabaseSyncCtor: typeof import('node:sqlite').DatabaseSync;
+  try {
+    const mod = await import('node:sqlite');
+    DatabaseSyncCtor = mod.DatabaseSync;
+  } catch {
+    throw new Error('node:sqlite is not available in this Node runtime (requires Node 22.5+). The opencode_pasted_image tool cannot run.');
+  }
+
+  const db = new DatabaseSyncCtor(dbPath, { readOnly: true, timeout: 5000 });
+  try {
+    const ses = db.prepare('SELECT session_id AS id FROM message ORDER BY time_created DESC LIMIT 1').get() as { id: string } | undefined;
+    if (!ses) {
+      throw new Error('No opencode session found in database.');
+    }
+    const sessionId = ses.id;
+
+    const row = db.prepare(
+      `SELECT json_extract(data,'$.url') AS url,
+              json_extract(data,'$.filename') AS filename,
+              json_extract(data,'$.mime') AS mime,
+              time_created AS timeCreated
+       FROM part
+       WHERE session_id = ?
+         AND data LIKE '%"type":"file"%'
+         AND data LIKE '%"url":"data:image%'
+       ORDER BY time_created DESC
+       LIMIT 1`
+    ).get(sessionId) as { url: string | null; filename: string | null; mime: string | null; timeCreated: number } | undefined;
+
+    if (!row || !row.url) {
+      throw new Error(
+        `No pasted image found in the current opencode session (${sessionId}). This tool only reads images pasted into the active opencode conversation and does not fall back to other sessions.`
+      );
+    }
+
+    const parsed = parseDataUrl(row.url);
+    if (!supportedMimeTypeSet.has(parsed.mediaType)) {
+      throw new Error(`Unsupported image media type "${parsed.mediaType}" in opencode part. Supported: ${[...supportedMimeTypeSet].join(', ')}.`);
+    }
+
+    const buffer = Buffer.from(parsed.base64, 'base64');
+    const filename = row.filename ?? undefined;
+    const { imageId, path: imagePath, bytes, expiresAt } = await registerUpload(buffer, parsed.mediaType, filename);
+
+    return {
+      tool: 'opencode_pasted_image',
+      imageId,
+      path: imagePath,
+      bytes,
+      mediaType: parsed.mediaType,
+      filename: row.filename,
+      sessionId,
+      timeCreated: row.timeCreated,
+      expiresAt: expiresAt.toISOString()
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function parseDataUrl(url: string): { mediaType: string; base64: string } {
+  const match = /^data:([^;]+);base64,(.*)$/su.exec(url);
+  const mediaType = match?.[1];
+  const base64 = match?.[2];
+  if (!mediaType || !base64) {
+    throw new Error('Unsupported image data URL format in opencode part.');
+  }
+  return { mediaType, base64 };
+}
+
 export async function describeImage(input: DescribeImageInput): Promise<VisionResult> {
   const image = await prepareImage(input.image);
   const prompt = [
@@ -166,6 +389,25 @@ export async function compareImages(input: CompareImagesInput): Promise<VisionRe
 }
 
 async function prepareImage(input: ImageInput): Promise<PreparedImage> {
+  if (input.imageId !== undefined) {
+    const resolvedPath = await resolveImageId(input.imageId);
+    const mediaType = input.mediaType ?? mediaTypeFromPath(resolvedPath);
+    const fileStat = await stat(resolvedPath);
+    if (!fileStat.isFile()) {
+      throw new Error(`Image path is not a file: ${resolvedPath}`);
+    }
+    assertImageSize(fileStat.size);
+
+    const data = await readFile(resolvedPath, 'base64');
+    return {
+      source: 'path',
+      mediaType,
+      data,
+      path: resolvedPath,
+      bytes: fileStat.size
+    };
+  }
+
   if (input.url !== undefined) {
     const imageUrl = validateImageUrl(input.url);
     return { source: 'url', url: imageUrl };
@@ -184,7 +426,7 @@ async function prepareImage(input: ImageInput): Promise<PreparedImage> {
   }
 
   if (input.path === undefined) {
-    throw new Error('Image input is missing path, base64, or url.');
+    throw new Error('Image input is missing path, base64, url, or imageId.');
   }
 
   const resolvedPath = path.resolve(input.path);
