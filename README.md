@@ -80,6 +80,7 @@ VISIONTOOL_API_FORMAT=gemini VISIONTOOL_API_KEY=你的密钥 npm run dev
 
 - **默认允许的前缀**：`glm`、`deepseek`
 - **必需参数**：`_caller_model` - 调用模型必须标识自身
+- **provider 前缀兼容**：调用方形如 `provider/model`（如 `winterapi/glm-5.2`）时，会同时匹配完整串和去掉最后一个 `/` 之前 provider 部分的 model id，因此 `winterapi/glm-5.2` 可命中 `glm` 前缀
 
 这可以防止昂贵的多模态模型（如 GPT-4o、Claude）意外调用此 MCP 并浪费 API 额度。自定义白名单示例：
 

@@ -179,3 +179,40 @@ test('tools/call rejects missing or disallowed caller models before API calls', 
     });
   });
 });
+
+test('tools/call accepts caller models with a provider prefix (e.g. winterapi/glm-5.2)', async () => {
+  resetEnv();
+
+  await withMockVisionServer(async ({ baseUrl, calls }) => {
+    process.env.VISIONTOOL_BASE_URL = `${baseUrl}/anthropic/v1`;
+
+    await withMcpClient(async (client) => {
+      const result = await client.callTool({
+        name: 'describe_image',
+        arguments: {
+          image: { base64: Buffer.from('x').toString('base64'), mediaType: 'image/png' },
+          detail: 'low',
+          maxTokens: 256,
+          _caller_model: 'winterapi/glm-5.2'
+        }
+      });
+
+      assert.equal(result.isError, undefined);
+      assert.equal(result.structuredContent?.tool, 'describe_image');
+      assert.equal(calls.length, 1);
+
+      await assert.rejects(
+        () => client.callTool({
+          name: 'describe_image',
+          arguments: {
+            image: { base64: Buffer.from('x').toString('base64'), mediaType: 'image/png' },
+            detail: 'low',
+            maxTokens: 256,
+            _caller_model: 'winterapi/claude-opus-4-8'
+          }
+        }),
+        /not allowed/
+      );
+    });
+  });
+});

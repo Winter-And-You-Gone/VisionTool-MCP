@@ -74,7 +74,13 @@ export function assertCallerAllowed(callerModel: unknown): void {
     return;
   }
   const callerLower = caller.toLowerCase();
-  const allowed = prefixes.some((prefix) => callerLower.startsWith(prefix));
+  // Callers may be given as "provider/model" (e.g. "winterapi/glm-5.2"). Match
+  // the prefix against both the full caller and the model id after the last "/".
+  const slashIndex = callerLower.lastIndexOf('/');
+  const modelId = slashIndex >= 0 ? callerLower.slice(slashIndex + 1) : callerLower;
+  const allowed = prefixes.some(
+    (prefix) => callerLower.startsWith(prefix) || modelId.startsWith(prefix)
+  );
   if (!allowed) {
     throw new McpError(
       ErrorCode.InvalidParams,
