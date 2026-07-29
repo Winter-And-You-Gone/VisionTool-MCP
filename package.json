@@ -27,6 +27,7 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
+    "dotenv": "^16.6.1",
     "hpagent": "^1.2.0",
     "zod": "4.4.3"
   },

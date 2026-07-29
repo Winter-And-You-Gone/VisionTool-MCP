@@ -15,6 +15,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { z } from 'zod';
+import { config as loadDotenv } from 'dotenv';
 
 import {
   answerAboutImageSchema,
@@ -51,6 +52,12 @@ import {
 
 const moduleRoot = path.dirname(fileURLToPath(import.meta.url));
 const runtimeRoot = ['dist', 'src'].includes(path.basename(moduleRoot)) ? path.dirname(moduleRoot) : moduleRoot;
+
+// Load .env from the project root. Existing environment variables (e.g. those
+// injected by the MCP client) take precedence - .env only fills gaps, so it
+// works as a cross-client default without overriding explicit per-client config.
+loadDotenv({ path: path.join(runtimeRoot, '.env') });
+
 const packageVersion = readPackageVersion();
 
 const visionToolAnnotations: ToolAnnotations = {
