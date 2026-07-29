@@ -11,8 +11,7 @@ import {
 
 test('describe_image accepts path input and defaults', () => {
   const parsed = describeImageSchema.parse({
-    image: { path: 'sample.png' },
-    _caller_model: 'glm-4.5'
+    image: { path: 'sample.png' }
   });
 
   assert.equal(parsed.image.path, 'sample.png');
@@ -22,27 +21,23 @@ test('describe_image accepts path input and defaults', () => {
 
 test('image input requires exactly one source selector', () => {
   assert.throws(() => describeImageSchema.parse({
-    image: {},
-    _caller_model: 'glm-4.5'
+    image: {}
   }), /exactly one/);
   assert.throws(() => describeImageSchema.parse({
-    image: { path: 'sample.png', url: 'https://example.com/sample.png' },
-    _caller_model: 'glm-4.5'
+    image: { path: 'sample.png', url: 'https://example.com/sample.png' }
   }), /exactly one/);
 });
 
 test('base64 input requires mediaType', () => {
   assert.throws(() => describeImageSchema.parse({
-    image: { base64: Buffer.from('x').toString('base64') },
-    _caller_model: 'glm-4.5'
+    image: { base64: Buffer.from('x').toString('base64') }
   }), /mediaType is required/);
 
   const parsed = describeImageSchema.parse({
     image: {
       base64: Buffer.from('x').toString('base64'),
       mediaType: 'image/png'
-    },
-    _caller_model: 'glm-4.5'
+    }
   });
 
   assert.equal(parsed.image.mediaType, 'image/png');
@@ -52,8 +47,7 @@ test('ocr_image accepts language and layout options', () => {
   const parsed = ocrImageSchema.parse({
     image: { url: 'https://example.com/sample.png' },
     language: 'Chinese',
-    preserveLayout: false,
-    _caller_model: 'glm-4.5'
+    preserveLayout: false
   });
 
   assert.equal(parsed.language, 'Chinese');
@@ -63,14 +57,12 @@ test('ocr_image accepts language and layout options', () => {
 
 test('answer_about_image requires a question', () => {
   assert.throws(() => answerAboutImageSchema.parse({
-    image: { path: 'sample.png' },
-    _caller_model: 'glm-4.5'
+    image: { path: 'sample.png' }
   }));
 
   const parsed = answerAboutImageSchema.parse({
     image: { path: 'sample.png' },
-    question: 'What is visible?',
-    _caller_model: 'glm-4.5'
+    question: 'What is visible?'
   });
 
   assert.equal(parsed.question, 'What is visible?');
@@ -80,8 +72,7 @@ test('compare_images requires two images and accepts instruction', () => {
   const parsed = compareImagesSchema.parse({
     firstImage: { path: 'before.png' },
     secondImage: { path: 'after.png' },
-    instruction: 'Focus on UI layout changes.',
-    _caller_model: 'glm-4.5'
+    instruction: 'Focus on UI layout changes.'
   });
 
   assert.equal(parsed.firstImage.path, 'before.png');
@@ -91,27 +82,29 @@ test('compare_images requires two images and accepts instruction', () => {
 
 test('schemas reject unsupported mime types and invalid options', () => {
   assert.throws(() => describeImageSchema.parse({
-    image: { base64: 'eA==', mediaType: 'image/bmp' },
-    _caller_model: 'glm-4.5'
+    image: { base64: 'eA==', mediaType: 'image/bmp' }
   }));
 
   assert.throws(() => describeImageSchema.parse({
     image: { path: 'sample.png' },
-    detail: 'extreme',
-    _caller_model: 'glm-4.5'
+    detail: 'extreme'
   }));
 
   assert.throws(() => describeImageSchema.parse({
     image: { path: 'sample.png' },
-    maxTokens: 16,
-    _caller_model: 'glm-4.5'
+    maxTokens: 16
   }));
 });
 
-test('schemas require caller model identity', () => {
-  assert.throws(() => describeImageSchema.parse({
-    image: { path: 'sample.png' }
-  }), /_caller_model/);
+test('schemas accept an optional _caller_model', () => {
+  const without = describeImageSchema.parse({ image: { path: 'sample.png' } });
+  assert.equal(without._caller_model, undefined);
+
+  const withCaller = describeImageSchema.parse({
+    image: { path: 'sample.png' },
+    _caller_model: 'glm-4.5'
+  });
+  assert.equal(withCaller._caller_model, 'glm-4.5');
 });
 
 test('tool input schemas expose expected MCP tools', () => {
@@ -123,9 +116,9 @@ test('tool input schemas expose expected MCP tools', () => {
   ]);
 
   assert.equal(toolInputSchemas.describe_image.required.includes('image'), true);
-  assert.equal(toolInputSchemas.describe_image.required.includes('_caller_model'), true);
-  assert.equal(toolInputSchemas.ocr_image.required.includes('_caller_model'), true);
+  assert.equal(toolInputSchemas.describe_image.required.includes('_caller_model'), false);
+  assert.equal(toolInputSchemas.ocr_image.required.includes('_caller_model'), false);
   assert.equal(toolInputSchemas.answer_about_image.required.includes('question'), true);
-  assert.equal(toolInputSchemas.answer_about_image.required.includes('_caller_model'), true);
-  assert.equal(toolInputSchemas.compare_images.required.includes('_caller_model'), true);
+  assert.equal(toolInputSchemas.answer_about_image.required.includes('_caller_model'), false);
+  assert.equal(toolInputSchemas.compare_images.required.includes('_caller_model'), false);
 });

@@ -53,9 +53,6 @@ const moduleRoot = path.dirname(fileURLToPath(import.meta.url));
 const runtimeRoot = ['dist', 'src'].includes(path.basename(moduleRoot)) ? path.dirname(moduleRoot) : moduleRoot;
 const packageVersion = readPackageVersion();
 
-// Caller model whitelist: only allow GLM / DeepSeek series by default
-export const defaultAllowedCallerPrefixes = ['glm', 'deepseek'];
-
 const visionToolAnnotations: ToolAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -63,34 +60,44 @@ const visionToolAnnotations: ToolAnnotations = {
   openWorldHint: true
 };
 
-export function assertCallerAllowed(callerModel: unknown): void {
-  const rawAllowed = process.env.VISIONTOOL_ALLOWED_CALLER_PREFIXES?.trim();
-  const prefixes = rawAllowed
-    ? rawAllowed.split(',').map((p) => p.trim().toLowerCase()).filter(Boolean)
-    : defaultAllowedCallerPrefixes;
+// Guidance prepended to every vision-tool description. The server is open by
+// default (no caller identity required); this tells multimodal callers not to
+// waste an upstream call when they can already see the image, while inviting
+// text-only or unsupported-image callers to use the tools.
+const usageGuard = '【护栏】仅当你无法直接看到图片时调用（例如你是纯文本模型，或图片在上下文中显示为 [Unsupported Image]）。能直接看到图片的多模态模型请勿调用，否则会浪费一次冗余的上游视觉请求。';
+
+// Optional caller-model blocklist. By default no model is blocked: the server
+// trusts the caller to decide whether it needs vision help (a multimodal model
+// that can already see an image should not call these tools - that judgement is
+// in the tool descriptions, not enforced by identity). Only when an operator
+// wants a hard guarantee that a specific model family never routes here do they
+// set VISIONTOOL_BLOCK_CALLER_PREFIXES; in that case _caller_model becomes
+// mandatory and any caller whose model id matches a blocked prefix is rejected.
+export function assertCallerNotBlocked(callerModel: unknown): void {
+  const rawBlocked = process.env.VISIONTOOL_BLOCK_CALLER_PREFIXES?.trim();
+  if (!rawBlocked) {
+    return; // No blocklist configured: open by default.
+  }
+  const prefixes = rawBlocked.split(',').map((p) => p.trim().toLowerCase()).filter(Boolean);
   const caller = typeof callerModel === 'string' ? callerModel.trim() : '';
   if (!caller) {
     throw new McpError(
       ErrorCode.InvalidParams,
-      '_caller_model is required. The caller must identify its model before using VisionToolMCP.'
+      '_caller_model is required because VISIONTOOL_BLOCK_CALLER_PREFIXES is set. Identify your model so it can be checked against the blocklist.'
     );
-  }
-  // '*' means allow any non-empty caller.
-  if (prefixes.includes('*')) {
-    return;
   }
   const callerLower = caller.toLowerCase();
   // Callers may be given as "provider/model" (e.g. "winterapi/glm-5.2"). Match
   // the prefix against both the full caller and the model id after the last "/".
   const slashIndex = callerLower.lastIndexOf('/');
   const modelId = slashIndex >= 0 ? callerLower.slice(slashIndex + 1) : callerLower;
-  const allowed = prefixes.some(
+  const blocked = prefixes.some(
     (prefix) => callerLower.startsWith(prefix) || modelId.startsWith(prefix)
   );
-  if (!allowed) {
+  if (blocked) {
     throw new McpError(
       ErrorCode.InvalidParams,
-      `Caller model "${caller}" is not allowed. VISIONTOOL_ALLOWED_CALLER_PREFIXES only permits models starting with ${prefixes.map((p) => `"${p}"`).join(', ')}.`
+      `Caller model "${caller}" is blocked by VISIONTOOL_BLOCK_CALLER_PREFIXES (${prefixes.map((p) => `"${p}"`).join(', ')}).`
     );
   }
 }
@@ -112,35 +119,35 @@ export function createVisionToolServer(): Server {
     const tools: Tool[] = [
       {
         name: 'upload_image',
-        description: '【默认仅限 GLM/DeepSeek 系列模型调用】Upload an image via base64 for later use with other vision tools. Auto-deleted after 30 minutes.',
+        description: `${usageGuard} Upload an image via base64 for later use with other vision tools. Auto-deleted after 30 minutes.`,
         inputSchema: asInputSchema(uploadImageToolInputSchema),
         outputSchema: asOutputSchema(uploadImageResultOutputSchema),
         annotations: { ...visionToolAnnotations, title: 'Upload Image' }
       },
       {
         name: 'describe_image',
-        description: '【默认仅限 GLM/DeepSeek 系列模型调用】Describe an image for a text-only agent. Accepts a local path, base64 image data, URL, or imageId from upload_image.',
+        description: `${usageGuard} Describe an image for a text-only agent. Accepts a local path, base64 image data, URL, or imageId from upload_image.`,
         inputSchema: asInputSchema(toolInputSchemas.describe_image),
         outputSchema: asOutputSchema(visionResultOutputSchema),
         annotations: { ...visionToolAnnotations, title: 'Describe Image' }
       },
       {
         name: 'ocr_image',
-        description: '【默认仅限 GLM/DeepSeek 系列模型调用】Extract visible text from an image with optional language and layout hints.',
+        description: `${usageGuard} Extract visible text from an image with optional language and layout hints.`,
         inputSchema: asInputSchema(toolInputSchemas.ocr_image),
         outputSchema: asOutputSchema(visionResultOutputSchema),
         annotations: { ...visionToolAnnotations, title: 'OCR Image' }
       },
       {
         name: 'answer_about_image',
-        description: '【默认仅限 GLM/DeepSeek 系列模型调用】Answer a specific question using visual evidence from one image.',
+        description: `${usageGuard} Answer a specific question using visual evidence from one image.`,
         inputSchema: asInputSchema(toolInputSchemas.answer_about_image),
         outputSchema: asOutputSchema(visionResultOutputSchema),
         annotations: { ...visionToolAnnotations, title: 'Answer About Image' }
       },
       {
         name: 'compare_images',
-        description: '【默认仅限 GLM/DeepSeek 系列模型调用】Compare two images and summarize relevant differences for a text-only agent.',
+        description: `${usageGuard} Compare two images and summarize relevant differences for a text-only agent.`,
         inputSchema: asInputSchema(toolInputSchemas.compare_images),
         outputSchema: asOutputSchema(visionResultOutputSchema),
         annotations: { ...visionToolAnnotations, title: 'Compare Images' }
@@ -184,7 +191,7 @@ async function handleToolCall(name: string, args: unknown): Promise<CallToolResu
   const callerModel = (args as Record<string, unknown>)?._caller_model;
 
   try {
-    assertCallerAllowed(callerModel);
+    assertCallerNotBlocked(callerModel);
 
     switch (name) {
       case 'upload_image':

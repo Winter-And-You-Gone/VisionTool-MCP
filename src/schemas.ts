@@ -26,16 +26,16 @@ export const uploadImageSchema = z.object({
   base64: z.string().min(1).max(maxBase64Length),
   mediaType: z.enum(supportedMimeTypes),
   filename: z.string().min(1).max(255).optional(),
-  _caller_model: z.string().min(1)
+  _caller_model: z.string().min(1).optional()
 }).strict();
 
 export const opencodePastedImageSchema = z.object({
-  _caller_model: z.string().min(1)
+  _caller_model: z.string().min(1).optional()
 }).strict();
 export type OpencodePastedImageInput = z.infer<typeof opencodePastedImageSchema>;
 
 export const claudePastedImageSchema = z.object({
-  _caller_model: z.string().min(1)
+  _caller_model: z.string().min(1).optional()
 }).strict();
 export type ClaudePastedImageInput = z.infer<typeof claudePastedImageSchema>;
 
@@ -43,7 +43,7 @@ const commonVisionOptionsSchema = z.object({
   detail: z.enum(detailLevels).optional().default('medium'),
   maxTokens: z.number().int().min(128).max(4096).optional().default(1024),
   model: z.string().min(1).optional(),
-  _caller_model: z.string().min(1)
+  _caller_model: z.string().min(1).optional()
 }).strict();
 
 export const describeImageSchema = z.object({
@@ -114,7 +114,7 @@ const commonProperties = {
   detail: { type: 'string', enum: detailLevels, default: 'medium', description: 'How much visual detail to request from the vision model.' },
   maxTokens: { type: 'integer', minimum: 128, maximum: 4096, default: 1024 },
   model: { type: 'string', description: 'Optional provider model override. Defaults to VISIONTOOL_MODEL or the selected provider default.' },
-  _caller_model: { type: 'string', description: '【限制项】调用方模型名。默认仅允许 GLM / DeepSeek 系列；可用 VISIONTOOL_ALLOWED_CALLER_PREFIXES 覆盖，* 表示允许任意非空调用者。' }
+  _caller_model: { type: 'string', description: '可选。调用方模型名；仅在设置了 VISIONTOOL_BLOCK_CALLER_PREFIXES 时用于黑名单校验。' }
 } as const;
 
 export const visionResultOutputSchema = {
@@ -154,7 +154,7 @@ export const toolInputSchemas = {
       focus: { type: 'string', description: 'Optional visual area or topic to focus on.' },
       ...commonProperties
     },
-    required: ['image', '_caller_model'],
+    required: ['image'],
     additionalProperties: false
   },
   ocr_image: {
@@ -166,7 +166,7 @@ export const toolInputSchemas = {
       ...commonProperties,
       maxTokens: { type: 'integer', minimum: 128, maximum: 4096, default: 2048 }
     },
-    required: ['image', '_caller_model'],
+    required: ['image'],
     additionalProperties: false
   },
   answer_about_image: {
@@ -176,7 +176,7 @@ export const toolInputSchemas = {
       question: { type: 'string', description: 'Question to answer using visual evidence from the image.' },
       ...commonProperties
     },
-    required: ['image', 'question', '_caller_model'],
+    required: ['image', 'question'],
     additionalProperties: false
   },
   compare_images: {
@@ -188,7 +188,7 @@ export const toolInputSchemas = {
       ...commonProperties,
       maxTokens: { type: 'integer', minimum: 128, maximum: 4096, default: 1536 }
     },
-    required: ['firstImage', 'secondImage', '_caller_model'],
+    required: ['firstImage', 'secondImage'],
     additionalProperties: false
   }
 } as const;
@@ -201,7 +201,7 @@ export const uploadImageToolInputSchema = {
     filename: { type: 'string', description: 'Optional filename for reference (optional).' },
     ...commonProperties
   },
-  required: ['base64', 'mediaType', '_caller_model'],
+  required: ['base64', 'mediaType'],
   additionalProperties: false
 } as const;
 
@@ -223,7 +223,6 @@ export const opencodePastedImageToolInputSchema = {
   properties: {
     _caller_model: commonProperties._caller_model
   },
-  required: ['_caller_model'],
   additionalProperties: false
 } as const;
 
@@ -249,7 +248,6 @@ export const claudePastedImageToolInputSchema = {
   properties: {
     _caller_model: commonProperties._caller_model
   },
-  required: ['_caller_model'],
   additionalProperties: false
 } as const;
 

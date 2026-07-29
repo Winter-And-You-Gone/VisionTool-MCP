@@ -69,7 +69,7 @@ VISIONTOOL_API_FORMAT=gemini VISIONTOOL_API_KEY=你的密钥 npm run dev
 | `VISIONTOOL_ALLOW_PRIVATE_URLS` | 允许 localhost/private IP 图像 URL 被发送给上游视觉模型 | `false` |
 | `VISIONTOOL_PROXY_URL` | 网络错误后重试使用的代理 URL | `HTTP_PROXY` / `HTTPS_PROXY` / `http://127.0.0.1:7890` |
 | `VISIONTOOL_DISABLE_PROXY_FALLBACK` | 设为 `1`/`true`/`yes`/`on` 时关闭代理 fallback | `false` |
-| `VISIONTOOL_ALLOWED_CALLER_PREFIXES` | 调用者模型前缀白名单，用逗号分隔 | `glm,deepseek` |
+| `VISIONTOOL_BLOCK_CALLER_PREFIXES` | 调用者模型前缀黑名单，用逗号分隔；设置后 `_caller_model` 变为必填，匹配前缀的模型被拒绝 | 空（默认放行所有调用者） |
 | `VISIONTOOL_UPLOAD_TTL_MS` | 上传图像的自动过期时间（毫秒） | `1800000` (30 分钟) |
 | `VISIONTOOL_ENABLE_OPENCODE` | 设为 `1`/`true`/`yes`/`on` 时启用 opencode 专属的 `opencode_pasted_image` 工具（自动检测 `~/.local/share/opencode/opencode.db`） | `false` |
 | `VISIONTOOL_OPENCODE_DB` | 显式指定 opencode 数据库路径；设置后同样启用 `opencode_pasted_image` 工具 | - |
@@ -77,23 +77,22 @@ VISIONTOOL_API_FORMAT=gemini VISIONTOOL_API_KEY=你的密钥 npm run dev
 | `VISIONTOOL_CLAUDE_PROJECTS_DIR` | Claude Code transcript 目录，默认 `~/.claude/projects` | `~/.claude/projects` |
 | `VISIONTOOL_CLAUDE_MAX_JSONL_BYTES` | 读取 transcript 的大小上限（字节），超过则报错 | `104857600` (100 MB) |
 
-## 调用者模型白名单
+## 调用者护栏
 
-默认情况下，此 MCP 服务器启用调用者模型白名单：
+此 MCP 服务器**默认对任何调用者开放**，不要求 `_caller_model`。理由：是否需要视觉能力是**上下文判断**而非身份判断--同一个多模态模型，能直接看到图片时不该调用，拿到 `[Unsupported Image]` 时就该调用。靠模型名白名单拦截会误伤正当用户（比如 Claude 因 harness 传输问题看不到图、却需要求助），且白名单本身可被调用方伪造，并非硬保证。
 
-- **默认允许的前缀**：`glm`、`deepseek`
-- **必需参数**：`_caller_model` - 调用模型必须标识自身
-- **provider 前缀兼容**：调用方形如 `provider/model`（如 `winterapi/glm-5.2`）时，会同时匹配完整串和去掉最后一个 `/` 之前 provider 部分的 model id，因此 `winterapi/glm-5.2` 可命中 `glm` 前缀
+护栏放在**工具描述**里：每个视觉工具的描述都写明"仅当你无法直接看到图片时调用，能直接看到图的多模态模型请勿调用"，由调用方自判。
 
-这可以防止昂贵的多模态模型（如 GPT-4o、Claude）意外调用此 MCP 并浪费 API 额度。自定义白名单示例：
+如果需要**硬保证**某个模型族永不路由到本服务器（例如防止某个多模态模型误调用浪费额度），可设置可选黑名单：
 
 ```bash
-# 仅允许 GLM 和 Qwen 系列
-VISIONTOOL_ALLOWED_CALLER_PREFIXES=glm,qwen
-
-# 允许所有调用者（不推荐用于生产环境）
-VISIONTOOL_ALLOWED_CALLER_PREFIXES=*
+# 永不允许 claude / gpt 系列模型调用
+VISIONTOOL_BLOCK_CALLER_PREFIXES=claude,gpt
 ```
+
+设置黑名单后：
+- `_caller_model` 变为**必填**（否则拒绝，因为无法判断是否在黑名单内）
+- 调用方形如 `provider/model`（如 `winterapi/gpt-4o`）时，会同时匹配完整串和去掉最后一个 `/` 之前部分的 model id，因此 `winterapi/gpt-4o` 会命中 `gpt` 前缀
 
 完整配置示例请参考 [`.env.example`](.env.example) 文件。
 
@@ -110,7 +109,7 @@ VISIONTOOL_ALLOWED_CALLER_PREFIXES=*
 ```json
 {
   "name": "opencode_pasted_image",
-  "arguments": { "_caller_model": "glm-5.2" }
+  "arguments": {}
 }
 ```
 
@@ -136,7 +135,6 @@ VISIONTOOL_ALLOWED_CALLER_PREFIXES=*
 {
   "name": "describe_image",
   "arguments": {
-    "_caller_model": "glm-5.2",
     "image": { "imageId": "6b49d277-c27d-434c-8e52-8601c8f5a1fb" }
   }
 }
@@ -157,7 +155,7 @@ VISIONTOOL_ALLOWED_CALLER_PREFIXES=*
 ```json
 {
   "name": "claude_pasted_image",
-  "arguments": { "_caller_model": "glm-5.2" }
+  "arguments": {}
 }
 ```
 
@@ -181,7 +179,6 @@ VISIONTOOL_ALLOWED_CALLER_PREFIXES=*
 {
   "name": "describe_image",
   "arguments": {
-    "_caller_model": "glm-5.2",
     "image": { "imageId": "6b49d277-c27d-434c-8e52-8601c8f5a1fb" }
   }
 }
@@ -191,7 +188,7 @@ VISIONTOOL_ALLOWED_CALLER_PREFIXES=*
 
 ## 工具调用示例
 
-所有工具都必须传 `_caller_model`。默认只允许以 `glm` 或 `deepseek` 开头的调用者模型：
+所有工具默认无需 `_caller_model`（仅在设置了 `VISIONTOOL_BLOCK_CALLER_PREFIXES` 黑名单时才必填）：
 
 ### 图像上传（推荐）
 
@@ -201,7 +198,6 @@ VISIONTOOL_ALLOWED_CALLER_PREFIXES=*
 {
   "name": "upload_image",
   "arguments": {
-    "_caller_model": "glm-4.5",
     "base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
     "mediaType": "image/png",
     "filename": "screenshot"
@@ -226,7 +222,6 @@ VISIONTOOL_ALLOWED_CALLER_PREFIXES=*
 {
   "name": "describe_image",
   "arguments": {
-    "_caller_model": "glm-4.5",
     "image": {
       "imageId": "550e8400-e29b-41d4-a716-446655440000"
     }
@@ -242,7 +237,6 @@ VISIONTOOL_ALLOWED_CALLER_PREFIXES=*
 {
   "name": "describe_image",
   "arguments": {
-    "_caller_model": "glm-4.5",
     "image": {
       "path": "X:/screenshots/current.png"
     },

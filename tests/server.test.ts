@@ -79,7 +79,6 @@ async function withMockVisionServer<T>(callback: (context: { baseUrl: string; ca
 function resetEnv(): void {
   process.env = { ...originalEnv };
   process.env.ANTHROPIC_API_KEY = 'test-key';
-  process.env.VISIONTOOL_ALLOWED_CALLER_PREFIXES = 'glm,deepseek';
   process.env.VISIONTOOL_RETRIES = '0';
   process.env.VISIONTOOL_RETRY_BASE_MS = '0';
   process.env.VISIONTOOL_DISABLE_PROXY_FALLBACK = '1';
@@ -90,6 +89,7 @@ function resetEnv(): void {
   delete process.env.CLAUDE_CODE_SESSION_ID;
   delete process.env.VISIONTOOL_ENABLE_CLAUDE;
   delete process.env.VISIONTOOL_CLAUDE_PROJECTS_DIR;
+  delete process.env.VISIONTOOL_BLOCK_CALLER_PREFIXES;
 }
 
 test('tools/list exposes output schemas and safety annotations', async () => {
@@ -147,13 +147,66 @@ test('tools/call returns structuredContent for successful calls', async () => {
   }
 });
 
-test('tools/call rejects missing or disallowed caller models before API calls', async () => {
+test('tools/call is open by default: no _caller_model required', async () => {
   resetEnv();
 
   await withMockVisionServer(async ({ baseUrl, calls }) => {
     process.env.VISIONTOOL_BASE_URL = `${baseUrl}/anthropic/v1`;
 
     await withMcpClient(async (client) => {
+      const result = await client.callTool({
+        name: 'describe_image',
+        arguments: {
+          image: { base64: Buffer.from('x').toString('base64'), mediaType: 'image/png' },
+          detail: 'low',
+          maxTokens: 256
+        }
+      });
+
+      assert.equal(result.isError, undefined);
+      assert.equal(result.structuredContent?.tool, 'describe_image');
+      assert.equal(calls.length, 1);
+    });
+  });
+});
+
+test('VISIONTOOL_BLOCK_CALLER_PREFIXES blocks matching models and requires _caller_model', async () => {
+  resetEnv();
+
+  await withMockVisionServer(async ({ baseUrl, calls }) => {
+    process.env.VISIONTOOL_BASE_URL = `${baseUrl}/anthropic/v1`;
+    process.env.VISIONTOOL_BLOCK_CALLER_PREFIXES = 'claude,gpt';
+
+    await withMcpClient(async (client) => {
+      // Blocked model is rejected before any upstream call.
+      await assert.rejects(
+        () => client.callTool({
+          name: 'describe_image',
+          arguments: {
+            image: { base64: Buffer.from('x').toString('base64'), mediaType: 'image/png' },
+            detail: 'low',
+            maxTokens: 256,
+            _caller_model: 'claude-opus-4-8'
+          }
+        }),
+        /blocked/
+      );
+
+      // Provider-prefixed blocked model is also rejected (matches model id after '/').
+      await assert.rejects(
+        () => client.callTool({
+          name: 'describe_image',
+          arguments: {
+            image: { base64: Buffer.from('x').toString('base64'), mediaType: 'image/png' },
+            detail: 'low',
+            maxTokens: 256,
+            _caller_model: 'winterapi/gpt-4o'
+          }
+        }),
+        /blocked/
+      );
+
+      // When a blocklist is set, _caller_model becomes mandatory.
       await assert.rejects(
         () => client.callTool({
           name: 'describe_image',
@@ -166,57 +219,19 @@ test('tools/call rejects missing or disallowed caller models before API calls', 
         /_caller_model is required/
       );
 
-      await assert.rejects(
-        () => client.callTool({
-          name: 'describe_image',
-          arguments: {
-            image: { base64: Buffer.from('x').toString('base64'), mediaType: 'image/png' },
-            detail: 'low',
-            maxTokens: 256,
-            _caller_model: 'claude-opus-4-8'
-          }
-        }),
-        /not allowed/
-      );
-
-      assert.equal(calls.length, 0);
-    });
-  });
-});
-
-test('tools/call accepts caller models with a provider prefix (e.g. winterapi/glm-5.2)', async () => {
-  resetEnv();
-
-  await withMockVisionServer(async ({ baseUrl, calls }) => {
-    process.env.VISIONTOOL_BASE_URL = `${baseUrl}/anthropic/v1`;
-
-    await withMcpClient(async (client) => {
+      // Non-blocked model still goes through.
       const result = await client.callTool({
         name: 'describe_image',
         arguments: {
           image: { base64: Buffer.from('x').toString('base64'), mediaType: 'image/png' },
           detail: 'low',
           maxTokens: 256,
-          _caller_model: 'winterapi/glm-5.2'
+          _caller_model: 'glm-4.5'
         }
       });
 
       assert.equal(result.isError, undefined);
-      assert.equal(result.structuredContent?.tool, 'describe_image');
       assert.equal(calls.length, 1);
-
-      await assert.rejects(
-        () => client.callTool({
-          name: 'describe_image',
-          arguments: {
-            image: { base64: Buffer.from('x').toString('base64'), mediaType: 'image/png' },
-            detail: 'low',
-            maxTokens: 256,
-            _caller_model: 'winterapi/claude-opus-4-8'
-          }
-        }),
-        /not allowed/
-      );
     });
   });
 });
@@ -240,7 +255,6 @@ function buildClaudeTranscriptLine(imageBase64: string, mediaType = 'image/png')
 
 test('claude_pasted_image extracts the latest inline image from the session transcript', async () => {
   resetEnv();
-  process.env.VISIONTOOL_ALLOWED_CALLER_PREFIXES = 'glm,deepseek';
 
   const sessionId = 'test-session-uuid';
   const projectsDir = path.join(os.tmpdir(), `visiontool-claude-projects-${Date.now()}`);
@@ -301,7 +315,6 @@ test('claude_pasted_image is not registered when CLAUDE_CODE_SESSION_ID is absen
 
 test('claude_pasted_image errors clearly when the transcript has no image', async () => {
   resetEnv();
-  process.env.VISIONTOOL_ALLOWED_CALLER_PREFIXES = 'glm,deepseek';
 
   const sessionId = 'test-session-noimg';
   const projectsDir = path.join(os.tmpdir(), `visiontool-claude-projects-${Date.now()}`);
