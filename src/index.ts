@@ -72,13 +72,15 @@ const usageGuard = '【护栏】仅当你无法直接看到图片时调用（例
 // in the tool descriptions, not enforced by identity). Only when an operator
 // wants a hard guarantee that a specific model family never routes here do they
 // set VISIONTOOL_BLOCK_CALLER_PREFIXES; in that case _caller_model becomes
-// mandatory and any caller whose model id matches a blocked prefix is rejected.
+// mandatory and any caller whose model id contains a blocked substring is
+// rejected. Matching is substring-based so "gpt" blocks "gpt-4o",
+// "opencode/gpt-5.5", and "azure-gpt-5" alike.
 export function assertCallerNotBlocked(callerModel: unknown): void {
   const rawBlocked = process.env.VISIONTOOL_BLOCK_CALLER_PREFIXES?.trim();
   if (!rawBlocked) {
     return; // No blocklist configured: open by default.
   }
-  const prefixes = rawBlocked.split(',').map((p) => p.trim().toLowerCase()).filter(Boolean);
+  const substrings = rawBlocked.split(',').map((p) => p.trim().toLowerCase()).filter(Boolean);
   const caller = typeof callerModel === 'string' ? callerModel.trim() : '';
   if (!caller) {
     throw new McpError(
@@ -87,17 +89,11 @@ export function assertCallerNotBlocked(callerModel: unknown): void {
     );
   }
   const callerLower = caller.toLowerCase();
-  // Callers may be given as "provider/model" (e.g. "winterapi/glm-5.2"). Match
-  // the prefix against both the full caller and the model id after the last "/".
-  const slashIndex = callerLower.lastIndexOf('/');
-  const modelId = slashIndex >= 0 ? callerLower.slice(slashIndex + 1) : callerLower;
-  const blocked = prefixes.some(
-    (prefix) => callerLower.startsWith(prefix) || modelId.startsWith(prefix)
-  );
+  const blocked = substrings.some((sub) => callerLower.includes(sub));
   if (blocked) {
     throw new McpError(
       ErrorCode.InvalidParams,
-      `Caller model "${caller}" is blocked by VISIONTOOL_BLOCK_CALLER_PREFIXES (${prefixes.map((p) => `"${p}"`).join(', ')}).`
+      `Caller model "${caller}" is blocked by VISIONTOOL_BLOCK_CALLER_PREFIXES (${substrings.map((p) => `"${p}"`).join(', ')}).`
     );
   }
 }

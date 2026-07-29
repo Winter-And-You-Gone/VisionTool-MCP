@@ -69,7 +69,7 @@ VISIONTOOL_API_FORMAT=gemini VISIONTOOL_API_KEY=你的密钥 npm run dev
 | `VISIONTOOL_ALLOW_PRIVATE_URLS` | 允许 localhost/private IP 图像 URL 被发送给上游视觉模型 | `false` |
 | `VISIONTOOL_PROXY_URL` | 网络错误后重试使用的代理 URL | `HTTP_PROXY` / `HTTPS_PROXY` / `http://127.0.0.1:7890` |
 | `VISIONTOOL_DISABLE_PROXY_FALLBACK` | 设为 `1`/`true`/`yes`/`on` 时关闭代理 fallback | `false` |
-| `VISIONTOOL_BLOCK_CALLER_PREFIXES` | 调用者模型前缀黑名单，用逗号分隔；设置后 `_caller_model` 变为必填，匹配前缀的模型被拒绝 | 空（默认放行所有调用者） |
+| `VISIONTOOL_BLOCK_CALLER_PREFIXES` | 调用者模型名黑名单，用逗号分隔；设置后 `_caller_model` 变为必填，名字**包含**任一关键字的模型被拒绝（子串匹配，如 `gpt` 可挡 `gpt-4o`、`opencode/gpt-5.5`、`azure-gpt-5`） | 空（默认放行所有调用者） |
 | `VISIONTOOL_UPLOAD_TTL_MS` | 上传图像的自动过期时间（毫秒） | `1800000` (30 分钟) |
 | `VISIONTOOL_ENABLE_OPENCODE` | 设为 `1`/`true`/`yes`/`on` 时启用 opencode 专属的 `opencode_pasted_image` 工具（自动检测 `~/.local/share/opencode/opencode.db`） | `false` |
 | `VISIONTOOL_OPENCODE_DB` | 显式指定 opencode 数据库路径；设置后同样启用 `opencode_pasted_image` 工具 | - |
@@ -92,7 +92,7 @@ VISIONTOOL_BLOCK_CALLER_PREFIXES=claude,gpt
 
 设置黑名单后：
 - `_caller_model` 变为**必填**（否则拒绝，因为无法判断是否在黑名单内）
-- 调用方形如 `provider/model`（如 `winterapi/gpt-4o`）时，会同时匹配完整串和去掉最后一个 `/` 之前部分的 model id，因此 `winterapi/gpt-4o` 会命中 `gpt` 前缀
+- 匹配方式为**子串包含**：只要模型名（含 `provider/` 前缀部分）中出现任一关键字即被挡。例如 `gpt` 可挡 `gpt-4o`、`opencode/gpt-5.5`、`azure-gpt-5`
 
 完整配置示例请参考 [`.env.example`](.env.example) 文件。
 

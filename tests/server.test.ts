@@ -192,19 +192,22 @@ test('VISIONTOOL_BLOCK_CALLER_PREFIXES blocks matching models and requires _call
         /blocked/
       );
 
-      // Provider-prefixed blocked model is also rejected (matches model id after '/').
-      await assert.rejects(
-        () => client.callTool({
-          name: 'describe_image',
-          arguments: {
-            image: { base64: Buffer.from('x').toString('base64'), mediaType: 'image/png' },
-            detail: 'low',
-            maxTokens: 256,
-            _caller_model: 'winterapi/gpt-4o'
-          }
-        }),
-        /blocked/
-      );
+      // Substring match: "gpt" anywhere in the caller is blocked, not just as a prefix.
+      // Covers "opencode/gpt-5.5" (after '/'), "azure-gpt-5" (in the middle), etc.
+      for (const caller of ['opencode/gpt-5.5', 'azure-gpt-5', 'GPT-4o']) {
+        await assert.rejects(
+          () => client.callTool({
+            name: 'describe_image',
+            arguments: {
+              image: { base64: Buffer.from('x').toString('base64'), mediaType: 'image/png' },
+              detail: 'low',
+              maxTokens: 256,
+              _caller_model: caller
+            }
+          }),
+          /blocked/
+        );
+      }
 
       // When a blocklist is set, _caller_model becomes mandatory.
       await assert.rejects(
