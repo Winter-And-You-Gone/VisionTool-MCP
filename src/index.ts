@@ -53,10 +53,13 @@ import {
 const moduleRoot = path.dirname(fileURLToPath(import.meta.url));
 const runtimeRoot = ['dist', 'src'].includes(path.basename(moduleRoot)) ? path.dirname(moduleRoot) : moduleRoot;
 
-// Load .env from the project root. Existing environment variables (e.g. those
-// injected by the MCP client) take precedence - .env only fills gaps, so it
-// works as a cross-client default without overriding explicit per-client config.
-loadDotenv({ path: path.join(runtimeRoot, '.env') });
+// Load .env from the project root and let it override any client-injected env.
+// MCP clients cache server config in memory and may relaunch with stale env
+// even after their config file is edited; override:true makes .env the single
+// source of truth so the server always reflects the project file, not a cached
+// copy of the client's. Per-client env blocks can no longer override .env - edit
+// .env directly to change config.
+loadDotenv({ path: path.join(runtimeRoot, '.env'), override: true });
 
 const packageVersion = readPackageVersion();
 
