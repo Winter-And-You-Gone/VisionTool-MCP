@@ -18,6 +18,9 @@ import { z } from 'zod';
 
 import {
   answerAboutImageSchema,
+  claudePastedImageSchema,
+  claudePastedImageResultOutputSchema,
+  claudePastedImageToolInputSchema,
   compareImagesSchema,
   describeImageSchema,
   ocrImageSchema,
@@ -32,6 +35,8 @@ import {
 } from './schemas.js';
 import {
   answerAboutImage,
+  claudeEnabled,
+  claudePastedImage,
   compareImages,
   describeImage,
   ocrImage,
@@ -39,6 +44,7 @@ import {
   opencodePastedImage,
   type VisionResult,
   type UploadResult,
+  type ClaudePastedImageResult,
   type OpencodePastedImageResult,
   uploadImage
 } from './vision.js';
@@ -151,6 +157,16 @@ export function createVisionToolServer(): Server {
       });
     }
 
+    if (claudeEnabled()) {
+      tools.push({
+        name: 'claude_pasted_image',
+        description: '【Claude Code 专属】Extract the most recently pasted image from the current Claude Code session transcript and return an imageId/path for use with describe_image / ocr_image / answer_about_image / compare_images. When a caller model cannot receive image attachments directly (e.g. the image shows up in context as "[Unsupported Image]"), call this tool — it reads the active Claude Code session transcript (CLAUDE_CODE_SESSION_ID), finds the latest inline base64 image block, decodes it, and registers it as an upload. It does NOT fall back to other sessions. Only registered when VISIONTOOL_ENABLE_CLAUDE=1 or CLAUDE_CODE_SESSION_ID is set (auto-detected inside Claude Code).',
+        inputSchema: asInputSchema(claudePastedImageToolInputSchema),
+        outputSchema: asOutputSchema(claudePastedImageResultOutputSchema),
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, title: 'Claude Pasted Image' }
+      });
+    }
+
     return { tools };
   });
 
@@ -189,6 +205,14 @@ async function handleToolCall(name: string, args: unknown): Promise<CallToolResu
           );
         }
         return jsonOpencodeResult(await opencodePastedImage(parseArgs(opencodePastedImageSchema, args)));
+      case 'claude_pasted_image':
+        if (!claudeEnabled()) {
+          throw new McpError(
+            ErrorCode.MethodNotFound,
+            'claude_pasted_image is not enabled. Run inside a Claude Code session (which sets CLAUDE_CODE_SESSION_ID) or set VISIONTOOL_ENABLE_CLAUDE=1.'
+          );
+        }
+        return jsonClaudeResult(await claudePastedImage(parseArgs(claudePastedImageSchema, args)));
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
@@ -250,6 +274,18 @@ function jsonUploadResult(value: UploadResult): CallToolResult {
 }
 
 function jsonOpencodeResult(value: OpencodePastedImageResult): CallToolResult {
+  return {
+    structuredContent: value as unknown as Record<string, unknown>,
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(value, null, 2)
+      }
+    ]
+  };
+}
+
+function jsonClaudeResult(value: ClaudePastedImageResult): CallToolResult {
   return {
     structuredContent: value as unknown as Record<string, unknown>,
     content: [

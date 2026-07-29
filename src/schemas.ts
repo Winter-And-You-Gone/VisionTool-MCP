@@ -34,6 +34,11 @@ export const opencodePastedImageSchema = z.object({
 }).strict();
 export type OpencodePastedImageInput = z.infer<typeof opencodePastedImageSchema>;
 
+export const claudePastedImageSchema = z.object({
+  _caller_model: z.string().min(1)
+}).strict();
+export type ClaudePastedImageInput = z.infer<typeof claudePastedImageSchema>;
+
 const commonVisionOptionsSchema = z.object({
   detail: z.enum(detailLevels).optional().default('medium'),
   maxTokens: z.number().int().min(128).max(4096).optional().default(1024),
@@ -236,5 +241,29 @@ export const opencodePastedImageResultOutputSchema = {
     expiresAt: { type: 'string', description: 'ISO timestamp when the extracted image will be auto-deleted.' }
   },
   required: ['tool', 'imageId', 'path', 'bytes', 'mediaType', 'filename', 'sessionId', 'timeCreated', 'expiresAt'],
+  additionalProperties: false
+} as const;
+
+export const claudePastedImageToolInputSchema = {
+  type: 'object',
+  properties: {
+    _caller_model: commonProperties._caller_model
+  },
+  required: ['_caller_model'],
+  additionalProperties: false
+} as const;
+
+export const claudePastedImageResultOutputSchema = {
+  type: 'object',
+  properties: {
+    tool: { type: 'string', description: 'Tool that produced this result.' },
+    imageId: { type: 'string', description: 'Image ID to use in subsequent vision calls (describe_image, ocr_image, answer_about_image, compare_images).' },
+    path: { type: 'string', description: 'Local path where the extracted image was saved.' },
+    bytes: { type: 'integer', minimum: 0, description: 'Image size in bytes.' },
+    mediaType: { type: 'string', description: 'Detected image MIME type.' },
+    sessionId: { type: 'string', description: 'Claude Code session ID the image was read from.' },
+    expiresAt: { type: 'string', description: 'ISO timestamp when the extracted image will be auto-deleted.' }
+  },
+  required: ['tool', 'imageId', 'path', 'bytes', 'mediaType', 'sessionId', 'expiresAt'],
   additionalProperties: false
 } as const;

@@ -1,4 +1,4 @@
-import { readFile, stat, writeFile, mkdir, unlink, rm } from 'node:fs/promises';
+import { readFile, stat, writeFile, mkdir, unlink, rm, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -9,6 +9,7 @@ import { HttpProxyAgent, HttpsProxyAgent } from 'hpagent';
 
 import type {
   AnswerAboutImageInput,
+  ClaudePastedImageInput,
   CompareImagesInput,
   DescribeImageInput,
   ImageInput,
@@ -35,6 +36,16 @@ export type OpencodePastedImageResult = {
   filename: string | null;
   sessionId: string;
   timeCreated: number;
+  expiresAt: string;
+};
+
+export type ClaudePastedImageResult = {
+  tool: 'claude_pasted_image';
+  imageId: string;
+  path: string;
+  bytes: number;
+  mediaType: string;
+  sessionId: string;
   expiresAt: string;
 };
 
@@ -341,6 +352,143 @@ function parseDataUrl(url: string): { mediaType: string; base64: string } {
     throw new Error('Unsupported image data URL format in opencode part.');
   }
   return { mediaType, base64 };
+}
+
+export function claudeEnabled(): boolean {
+  if (isTruthyEnv(process.env.VISIONTOOL_ENABLE_CLAUDE)) {
+    return true;
+  }
+  return (process.env.CLAUDE_CODE_SESSION_ID?.trim() ?? '').length > 0;
+}
+
+const defaultClaudeMaxJsonlBytes = 100 * 1024 * 1024; // 100 MB
+
+function getClaudeProjectsDir(): string {
+  const explicit = process.env.VISIONTOOL_CLAUDE_PROJECTS_DIR?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  return path.join(os.homedir(), '.claude', 'projects');
+}
+
+function escapeClaudeCwd(cwd: string): string {
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+async function resolveClaudeTranscriptPath(projectsDir: string, sessionId: string): Promise<string | undefined> {
+  const escaped = escapeClaudeCwd(process.cwd());
+  const direct = path.join(projectsDir, escaped, `${sessionId}.jsonl`);
+  if (existsSync(direct)) {
+    return direct;
+  }
+  // Fallback: scan all project subdirectories for <sessionId>.jsonl (UUID collision is negligible).
+  let entries: string[];
+  try {
+    entries = await readdir(projectsDir);
+  } catch {
+    return undefined;
+  }
+  for (const entry of entries) {
+    const candidate = path.join(projectsDir, entry, `${sessionId}.jsonl`);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+export async function claudePastedImage(_input: ClaudePastedImageInput): Promise<ClaudePastedImageResult> {
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID?.trim();
+  if (!sessionId) {
+    throw new Error(
+      'CLAUDE_CODE_SESSION_ID is not set. claude_pasted_image only works inside a Claude Code session (Claude Code exposes this env var to MCP servers). Set VISIONTOOL_ENABLE_CLAUDE=1 is not sufficient on its own.'
+    );
+  }
+
+  const projectsDir = getClaudeProjectsDir();
+  const transcriptPath = await resolveClaudeTranscriptPath(projectsDir, sessionId);
+  if (!transcriptPath || !existsSync(transcriptPath)) {
+    throw new Error(
+      `No transcript found for session ${sessionId} under ${projectsDir}. Set VISIONTOOL_CLAUDE_PROJECTS_DIR to the correct ~/.claude/projects path if it lives elsewhere.`
+    );
+  }
+
+  const statResult = await stat(transcriptPath);
+  const maxBytes = parsePositiveIntEnv('VISIONTOOL_CLAUDE_MAX_JSONL_BYTES', defaultClaudeMaxJsonlBytes);
+  if (statResult.size > maxBytes) {
+    throw new Error(
+      `Transcript ${transcriptPath} is ${statResult.size} bytes, exceeding VISIONTOOL_CLAUDE_MAX_JSONL_BYTES (${maxBytes}). Increase the limit or use a more recent session.`
+    );
+  }
+
+  const raw = await readFile(transcriptPath, 'utf8');
+  let lastImage: { mediaType: string; base64: string } | undefined;
+
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    let record: unknown;
+    try {
+      record = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (typeof record !== 'object' || record === null) {
+      continue;
+    }
+    const r = record as { type?: string; message?: { content?: unknown } };
+    if (r.type !== 'user') {
+      continue;
+    }
+    const content = r.message?.content;
+    if (!Array.isArray(content)) {
+      continue;
+    }
+    for (const part of content) {
+      if (typeof part !== 'object' || part === null) {
+        continue;
+      }
+      const p = part as { type?: string; source?: { type?: string; media_type?: string; data?: string } };
+      if (p.type !== 'image') {
+        continue;
+      }
+      const source = p.source;
+      if (!source || source.type !== 'base64') {
+        continue;
+      }
+      const mediaType = source.media_type;
+      const data = source.data;
+      if (!mediaType || !data) {
+        continue;
+      }
+      lastImage = { mediaType, base64: data };
+    }
+  }
+
+  if (!lastImage) {
+    throw new Error(
+      `No inline image found in the current Claude Code session transcript (${sessionId}). This tool only reads images pasted into the active conversation as base64; it does not fall back to other sessions.`
+    );
+  }
+
+  if (!supportedMimeTypeSet.has(lastImage.mediaType)) {
+    throw new Error(`Unsupported image media type "${lastImage.mediaType}" in Claude transcript. Supported: ${[...supportedMimeTypeSet].join(', ')}.`);
+  }
+
+  const buffer = Buffer.from(lastImage.base64, 'base64');
+  const { imageId, path: imagePath, bytes, expiresAt } = await registerUpload(buffer, lastImage.mediaType);
+
+  return {
+    tool: 'claude_pasted_image',
+    imageId,
+    path: imagePath,
+    bytes,
+    mediaType: lastImage.mediaType,
+    sessionId,
+    expiresAt: expiresAt.toISOString()
+  };
 }
 
 export async function describeImage(input: DescribeImageInput): Promise<VisionResult> {

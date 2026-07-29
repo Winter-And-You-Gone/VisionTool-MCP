@@ -73,6 +73,9 @@ VISIONTOOL_API_FORMAT=gemini VISIONTOOL_API_KEY=你的密钥 npm run dev
 | `VISIONTOOL_UPLOAD_TTL_MS` | 上传图像的自动过期时间（毫秒） | `1800000` (30 分钟) |
 | `VISIONTOOL_ENABLE_OPENCODE` | 设为 `1`/`true`/`yes`/`on` 时启用 opencode 专属的 `opencode_pasted_image` 工具（自动检测 `~/.local/share/opencode/opencode.db`） | `false` |
 | `VISIONTOOL_OPENCODE_DB` | 显式指定 opencode 数据库路径；设置后同样启用 `opencode_pasted_image` 工具 | - |
+| `VISIONTOOL_ENABLE_CLAUDE` | 设为 `1`/`true`/`yes`/`on` 时启用 Claude Code 专属的 `claude_pasted_image` 工具；在 Claude Code 会话内检测到 `CLAUDE_CODE_SESSION_ID` 时也会自动启用 | `false` |
+| `VISIONTOOL_CLAUDE_PROJECTS_DIR` | Claude Code transcript 目录，默认 `~/.claude/projects` | `~/.claude/projects` |
+| `VISIONTOOL_CLAUDE_MAX_JSONL_BYTES` | 读取 transcript 的大小上限（字节），超过则报错 | `104857600` (100 MB) |
 
 ## 调用者模型白名单
 
@@ -140,6 +143,51 @@ VISIONTOOL_ALLOWED_CALLER_PREFIXES=*
 ```
 
 依赖 Node 22.5+ 内置的 `node:sqlite`（运行时动态导入，不可用时该工具会清晰报错，不影响其它工具）。其它 agent 平台（无 opencode 数据库）请勿启用。
+
+## Claude Code 专属：claude_pasted_image
+
+这是一个**仅 Claude Code 适用**的工具，在 Claude Code 会话内默认自动注册（Claude Code 会向 MCP server 注入 `CLAUDE_CODE_SESSION_ID` 环境变量）。也可手动设 `VISIONTOOL_ENABLE_CLAUDE=1` 启用。
+
+**为什么需要它**：当用户在 Claude Code 对话里发了图片、但调用方模型不支持图像输入时，harness 会把图片块替换成 `[Unsupported Image]` 占位文本--调用方上下文里既无像素也无文件路径，唯一完整副本是以 base64 内联在会话 transcript JSONL（`~/.claude/projects/<转义后的cwd>/<sessionId>.jsonl`）里的。该工具直接从当前会话 transcript 里取"最新一张内联图"，解码落盘并注册为上传，返回 `imageId`/`path` 供其它视觉工具使用。
+
+**会话识别**：用 Claude Code 注入的 `CLAUDE_CODE_SESSION_ID` 定位当前会话 transcript，目录转义规则为 `process.cwd()` 中每个非字母数字字符替换为 `-`。找不到时会在所有项目子目录下兜底查找该 sessionId 的 jsonl。只在当前会话内取最新图片，**不会跨会话兜底**--当前会话没有内联图时直接报错。
+
+**用法**：
+
+```json
+{
+  "name": "claude_pasted_image",
+  "arguments": { "_caller_model": "glm-5.2" }
+}
+```
+
+响应：
+
+```json
+{
+  "tool": "claude_pasted_image",
+  "imageId": "6b49d277-c27d-434c-8e52-8601c8f5a1fb",
+  "path": "C:\\...\\visiontool-mcp-uploads\\image.png",
+  "bytes": 107005,
+  "mediaType": "image/png",
+  "sessionId": "fd71614b-ca6e-42e8-a55c-b990f0cb6247",
+  "expiresAt": "2026-07-29T11:30:00.000Z"
+}
+```
+
+然后用 `imageId` 调用其它工具：
+
+```json
+{
+  "name": "describe_image",
+  "arguments": {
+    "_caller_model": "glm-5.2",
+    "image": { "imageId": "6b49d277-c27d-434c-8e52-8601c8f5a1fb" }
+  }
+}
+```
+
+无需任何额外依赖（仅用 Node 内置 `fs`）。其它 agent 平台（无 `CLAUDE_CODE_SESSION_ID`）请勿启用。
 
 ## 工具调用示例
 
